@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUNNER_CLI="${ROOT_DIR}/bin/jit-runner"
+GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
+GITHUB_API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  jit-runner-controller --config PATH [--once] [--dry-run]
+
+The controller polls configured repositories for queued jobs containing the
+trigger label, creates one ephemeral runner per job, and destroys the VM after
+the GitHub runner deregisters or reaches its TTL.
+
+Environment:
+  JIT_RUNNER_GITHUB_TOKEN   GitHub Actions read and Administration write
+  HCLOUD_TOKEN             Hetzner Cloud token (not required for --dry-run)
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+github_request() {
+  local method="$1"
+  local endpoint="$2"
+  curl --fail-with-body --silent --show-error \
+    --request "$method" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer ${JIT_RUNNER_GITHUB_TOKEN}" \
+    --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
+    "${GITHUB_API_URL}/${endpoint}"
+}
+
+github_runner_state() {
+  local repository="$1"
+  local runner_id="$2"
+  local response body status
+  response="$(curl --silent --show-error \
+    --write-out $'\n%{http_code}' \
+    --header 'Accept: application/vnd.github+json' \
+    --header "Authorization: Bearer ${JIT_RUNNER_GITHUB_TOKEN}" \
+    --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
+    "${GITHUB_API_URL}/repos/${repository}/actions/runners/${runner_id}")"
+  status="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+  if [[ "$status" == 404 ]]; then
+    printf 'gone\n'
+    return 0
+  fi
+  if [[ "$status" != 200 ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  jq -r 'if .busy then "busy" else (.status // "unknown") end' <<<"$body"
+}
+
+write_status() {
+  local job_dir="$1"
+  local status="$2"
+  local repository="$3"
+  local job_id="$4"
+  local runner_id="${5:-}"
+  local message="${6:-}"
+  local temporary="${job_dir}/status.json.tmp"
+  jq -n \
+    --arg status "$status" \
+    --arg repository "$repository" \
+    --arg job_id "$job_id" \
+    --arg runner_id "$runner_id" \
+    --arg message "$message" \
+    --argjson updated_at "$(date +%s)" \
+    '{status:$status,repository:$repository,job_id:$job_id,runner_id:$runner_id,message:$message,updated_at:$updated_at}' \
+    >"$temporary"
+  mv "$temporary" "${job_dir}/status.json"
+}
+
+active_runner_count() {
+  local state_root="$1"
+  local count=0 status_file status
+  while IFS= read -r status_file; do
+    status="$(jq -r '.status // empty' "$status_file" 2>/dev/null || true)"
+    if [[ "$status" == provisioning || "$status" == watching || "$status" == cleaning ]]; then
+      count=$((count + 1))
+    fi
+  done < <(find "${state_root}/jobs" -mindepth 2 -maxdepth 2 -name status.json -type f 2>/dev/null)
+  printf '%s\n' "$count"
+}
+
+queued_jobs() {
+  local repository="$1"
+  local trigger_label="$2"
+  local run_status runs run_id jobs
+  for run_status in queued in_progress; do
+    runs="$(github_request GET "repos/${repository}/actions/runs?status=${run_status}&per_page=20")"
+    while IFS= read -r run_id; do
+      [[ -n "$run_id" ]] || continue
+      jobs="$(github_request GET "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100")"
+      jq -r --arg label "$trigger_label" \
+        '.jobs[] | select(.status == "queued") | select(.labels | index($label)) | .id' <<<"$jobs"
+    done < <(jq -r '.workflow_runs[].id' <<<"$runs")
+  done
+}
+
+cleanup_orphaned_workers() {
+  local state_root="$1"
+  local status_file status pid_file pid job_dir repository job_id runner_id
+  while IFS= read -r status_file; do
+    status="$(jq -r '.status // empty' "$status_file" 2>/dev/null || true)"
+    [[ "$status" == provisioning || "$status" == watching || "$status" == cleaning ]] || continue
+    job_dir="$(dirname "$status_file")"
+    pid_file="${job_dir}/worker.pid"
+    if [[ -r "$pid_file" ]]; then
+      pid="$(<"$pid_file")"
+    else
+      pid=""
+    fi
+    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+    repository="$(jq -r '.repository // empty' "$status_file")"
+    job_id="$(jq -r '.job_id // empty' "$status_file")"
+    runner_id="$(jq -r '.runner_id // empty' "$status_file")"
+    write_status "$job_dir" cleaning "$repository" "$job_id" "$runner_id" "recovering orphaned controller state"
+    if [[ -n "$runner_id" ]]; then
+      github_request DELETE "repos/${repository}/actions/runners/${runner_id}" >/dev/null 2>&1 || true
+    fi
+    if [[ -s "${job_dir}/metadata.json" ]]; then
+      "$RUNNER_CLI" destroy --state-dir "$job_dir" >>"${job_dir}/controller.log" 2>&1 || true
+    fi
+    write_status "$job_dir" failed "$repository" "$job_id" "$runner_id" "orphaned worker cleaned; rerun the workflow job"
+  done < <(find "${state_root}/jobs" -mindepth 2 -maxdepth 2 -name status.json -type f 2>/dev/null)
+}
+
+watch_and_destroy() {
+  local job_dir="$1"
+  local repository="$2"
+  local job_id="$3"
+  local runner_id="$4"
+  local expires_at state
+  expires_at="$(jq -r '.expires_at' "${job_dir}/metadata.json")"
+  write_status "$job_dir" watching "$repository" "$job_id" "$runner_id"
+  while (( $(date +%s) < expires_at )); do
+    state="$(github_runner_state "$repository" "$runner_id")"
+    if [[ "$state" == gone ]]; then
+      break
+    fi
+    sleep 15
+  done
+
+  write_status "$job_dir" cleaning "$repository" "$job_id" "$runner_id"
+  github_request DELETE "repos/${repository}/actions/runners/${runner_id}" >/dev/null 2>&1 || true
+  if "$RUNNER_CLI" destroy --state-dir "$job_dir" >>"${job_dir}/controller.log" 2>&1; then
+    write_status "$job_dir" completed "$repository" "$job_id" "$runner_id"
+  else
+    write_status "$job_dir" failed "$repository" "$job_id" "$runner_id" "cleanup failed; TTL sweep will retry"
+  fi
+}
+
+provision_for_job() {
+  local job_dir="$1"
+  local repository="$2"
+  local job_id="$3"
+  local trigger_label="$4"
+  local server_type="$5"
+  local location="$6"
+  local image="$7"
+  local architecture="$8"
+  local ttl_minutes="$9"
+  local runner_id
+
+  write_status "$job_dir" provisioning "$repository" "$job_id"
+  if ! "$RUNNER_CLI" provision \
+    --repository "$repository" \
+    --run-id "job-${job_id}" \
+    --state-dir "$job_dir" \
+    --server-type "$server_type" \
+    --location "$location" \
+    --image "$image" \
+    --architecture "$architecture" \
+    --ttl-minutes "$ttl_minutes" \
+    --labels "$trigger_label" >"${job_dir}/provision.log" 2>&1; then
+    write_status "$job_dir" failed "$repository" "$job_id" "" "provisioning failed; inspect provision.log"
+    return 1
+  fi
+  runner_id="$(sed -n 's/^runner-id=//p' "${job_dir}/provision.log" | tail -1)"
+  if [[ ! "$runner_id" =~ ^[0-9]+$ ]]; then
+    write_status "$job_dir" failed "$repository" "$job_id" "" "runner ID missing from provision output"
+    "$RUNNER_CLI" destroy --state-dir "$job_dir" >>"${job_dir}/controller.log" 2>&1 || true
+    return 1
+  fi
+  watch_and_destroy "$job_dir" "$repository" "$job_id" "$runner_id"
+}
+
+main() {
+  local config=""
+  local once=false
+  local dry_run=false
+  local repositories poll_seconds max_runners trigger_label server_type location image architecture ttl_minutes state_root
+  local repository job_id job_key job_dir active worker_pid
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --config) config="${2:-}"; shift 2 ;;
+      --once) once=true; shift ;;
+      --dry-run) dry_run=true; shift ;;
+      -h|--help|help) usage; return 0 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [[ -s "$config" ]] || die "--config must point to a readable JSON file"
+  for command in curl jq find sed; do require_command "$command"; done
+  [[ -n "${JIT_RUNNER_GITHUB_TOKEN:-}" ]] || die "JIT_RUNNER_GITHUB_TOKEN is required"
+  if [[ "$dry_run" != true ]]; then
+    [[ -n "${HCLOUD_TOKEN:-}" ]] || die "HCLOUD_TOKEN is required"
+    for command in terraform ssh ssh-keygen; do require_command "$command"; done
+  fi
+
+  repositories="$(jq -r '.repositories[]' "$config")"
+  [[ -n "$repositories" ]] || die "config.repositories must not be empty"
+  poll_seconds="$(jq -r '.poll_seconds // 30' "$config")"
+  max_runners="$(jq -r '.max_runners // 1' "$config")"
+  trigger_label="$(jq -r '.trigger_label // "jit-runner"' "$config")"
+  server_type="$(jq -r '.server_type // "cx33"' "$config")"
+  location="$(jq -r '.location // "fsn1"' "$config")"
+  image="$(jq -r '.image // "ubuntu-24.04"' "$config")"
+  architecture="$(jq -r '.architecture // "x64"' "$config")"
+  ttl_minutes="$(jq -r '.ttl_minutes // 180' "$config")"
+  state_root="$(jq -r '.state_root // "./.jit-runner-controller"' "$config")"
+  [[ "$poll_seconds" =~ ^[1-9][0-9]*$ ]] || die "poll_seconds must be a positive integer"
+  [[ "$max_runners" =~ ^[1-9][0-9]*$ ]] || die "max_runners must be a positive integer"
+  [[ "$ttl_minutes" =~ ^[1-9][0-9]*$ ]] || die "ttl_minutes must be a positive integer"
+
+  mkdir -p "${state_root}/jobs"
+  state_root="$(cd "$state_root" && pwd)"
+  if [[ "$dry_run" != true ]]; then
+    cleanup_orphaned_workers "$state_root"
+  fi
+
+  while true; do
+    active="$(active_runner_count "$state_root")"
+    while IFS= read -r repository; do
+      [[ -n "$repository" ]] || continue
+      while IFS= read -r job_id; do
+        [[ "$job_id" =~ ^[0-9]+$ ]] || continue
+        job_key="$(printf '%s-%s' "${repository//\//-}" "$job_id" | tr '[:upper:]' '[:lower:]')"
+        job_dir="${state_root}/jobs/${job_key}"
+        if [[ -e "$job_dir" ]]; then
+          continue
+        fi
+        if (( active >= max_runners )); then
+          break
+        fi
+        if [[ "$dry_run" == true ]]; then
+          printf 'would-provision repository=%s job=%s label=%s\n' "$repository" "$job_id" "$trigger_label"
+          active=$((active + 1))
+          continue
+        fi
+        mkdir "$job_dir"
+        provision_for_job "$job_dir" "$repository" "$job_id" "$trigger_label" \
+          "$server_type" "$location" "$image" "$architecture" "$ttl_minutes" &
+        worker_pid="$!"
+        printf '%s\n' "$worker_pid" >"${job_dir}/worker.pid"
+        active=$((active + 1))
+      done < <(queued_jobs "$repository" "$trigger_label")
+    done <<<"$repositories"
+
+    if [[ "$once" == true ]]; then
+      wait
+      break
+    fi
+    sleep "$poll_seconds"
+  done
+}
+
+main "$@"

@@ -2,6 +2,6 @@
 *.tfstate
 *.tfstate.*
 .jit-runner-state/
+.jit-runner-controller/
 runner_ed25519
 runner_ed25519.pub
-

@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    if: ${{ vars.JIT_RUNNER_ENABLED == 'true' }}
+    runs-on: [self-hosted, linux, x64, jit-runner]
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3

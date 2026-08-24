@@ -1,0 +1,22 @@
+name: CI with zero GitHub-hosted minutes
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ephemeral-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: [self-hosted, linux, x64, jit-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run any project CI command
+        run: ./your-ci-command
+

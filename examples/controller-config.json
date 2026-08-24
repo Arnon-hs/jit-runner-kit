@@ -1,0 +1,15 @@
+{
+  "repositories": [
+    "your-owner/your-private-repository"
+  ],
+  "poll_seconds": 30,
+  "max_runners": 1,
+  "trigger_label": "jit-runner",
+  "server_type": "cx33",
+  "location": "fsn1",
+  "image": "ubuntu-24.04",
+  "architecture": "x64",
+  "ttl_minutes": 180,
+  "state_root": "/var/lib/jit-runner-controller"
+}
+

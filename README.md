@@ -84,6 +84,33 @@ jobs:
 
 The complete consumer and sweeper examples are in [`examples/`](examples/).
 
+## Zero GitHub-hosted minutes
+
+If GitHub-hosted jobs are disabled by budget or billing, run the controller outside GitHub Actions. It can run on a developer machine, an always-on free VM, or a small controller VPS:
+
+```bash
+export HCLOUD_TOKEN=...
+export JIT_RUNNER_GITHUB_TOKEN=...
+
+bin/jit-runner-controller \
+  --config /etc/jit-runner-kit/controller.json
+```
+
+The controller polls only configured repositories and reacts only to queued jobs containing its trigger label. A consumer workflow then needs a single job:
+
+```yaml
+jobs:
+  ci:
+    runs-on: [self-hosted, linux, x64, jit-runner]
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./your-ci-command
+```
+
+The controller creates the VM, waits for the one-job runner to deregister, and destroys the VM. No provisioning or cleanup job runs on GitHub-hosted infrastructure. See [`examples/controller-config.json`](examples/controller-config.json) and [`examples/zero-hosted-minutes.yml`](examples/zero-hosted-minutes.yml).
+
+Use `--once --dry-run` to inspect matching queued jobs without creating cloud resources.
+
 ## Local CLI
 
 ```bash
