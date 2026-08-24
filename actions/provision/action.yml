@@ -1,0 +1,100 @@
+name: Provision ephemeral JIT runner
+description: Create a one-job GitHub Actions runner on Hetzner Cloud.
+
+inputs:
+  hcloud-token:
+    description: Hetzner Cloud project token.
+    required: true
+  github-token:
+    description: GitHub token with Administration write on the target repository.
+    required: true
+  repository:
+    description: Target repository in owner/name format.
+    required: true
+  server-type:
+    description: Hetzner server type.
+    default: cx33
+  location:
+    description: Hetzner location.
+    default: fsn1
+  image:
+    description: Hetzner image.
+    default: ubuntu-24.04
+  architecture:
+    description: GitHub runner architecture, x64 or arm64.
+    default: x64
+  ttl-minutes:
+    description: Resource cleanup deadline.
+    default: "180"
+  runner-group-id:
+    description: GitHub runner group ID.
+    default: "1"
+  labels:
+    description: Optional comma-separated runner labels.
+    default: ""
+  ssh-allowed-cidr:
+    description: Optional IPv4 CIDR allowed to reach SSH.
+    default: ""
+  state-dir:
+    description: Optional Terraform state directory.
+    default: ""
+
+outputs:
+  runner-label:
+    description: Unique label for the workload job runs-on list.
+    value: ${{ steps.provision.outputs.runner-label }}
+  runner-id:
+    description: GitHub runner ID.
+    value: ${{ steps.provision.outputs.runner-id }}
+  server-id:
+    description: Hetzner server ID.
+    value: ${{ steps.provision.outputs.server-id }}
+  public-ip:
+    description: Temporary server IPv4.
+    value: ${{ steps.provision.outputs.public-ip }}
+  run-key:
+    description: Label-safe resource run key.
+    value: ${{ steps.provision.outputs.run-key }}
+  state-dir:
+    description: Directory that must be transferred to the cleanup job.
+    value: ${{ steps.provision.outputs.state-dir }}
+
+runs:
+  using: composite
+  steps:
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+    - id: provision
+      shell: bash
+      env:
+        HCLOUD_TOKEN: ${{ inputs.hcloud-token }}
+        JIT_RUNNER_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_SERVER_TYPE: ${{ inputs.server-type }}
+        INPUT_LOCATION: ${{ inputs.location }}
+        INPUT_IMAGE: ${{ inputs.image }}
+        INPUT_ARCHITECTURE: ${{ inputs.architecture }}
+        INPUT_TTL_MINUTES: ${{ inputs.ttl-minutes }}
+        INPUT_RUNNER_GROUP_ID: ${{ inputs.runner-group-id }}
+        INPUT_LABELS: ${{ inputs.labels }}
+        INPUT_SSH_ALLOWED_CIDR: ${{ inputs.ssh-allowed-cidr }}
+        INPUT_STATE_DIR: ${{ inputs.state-dir }}
+      run: |
+        state_dir="${INPUT_STATE_DIR:-${RUNNER_TEMP}/jit-runner-state}"
+        args=(provision \
+          --repository "$INPUT_REPOSITORY" \
+          --run-id "$GITHUB_RUN_ID" \
+          --run-attempt "$GITHUB_RUN_ATTEMPT" \
+          --state-dir "$state_dir" \
+          --server-type "$INPUT_SERVER_TYPE" \
+          --location "$INPUT_LOCATION" \
+          --image "$INPUT_IMAGE" \
+          --architecture "$INPUT_ARCHITECTURE" \
+          --ttl-minutes "$INPUT_TTL_MINUTES" \
+          --runner-group-id "$INPUT_RUNNER_GROUP_ID" \
+          --labels "$INPUT_LABELS")
+        if [[ -n "$INPUT_SSH_ALLOWED_CIDR" ]]; then
+          args+=(--ssh-allowed-cidr "$INPUT_SSH_ALLOWED_CIDR")
+        fi
+        "${GITHUB_ACTION_PATH}/../../bin/jit-runner" "${args[@]}"

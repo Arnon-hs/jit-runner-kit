@@ -1,0 +1,60 @@
+name: CI with an ephemeral runner
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ephemeral-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.runner.outputs.runner-label }}
+      run-key: ${{ steps.runner.outputs.run-key }}
+    steps:
+      - id: runner
+        uses: your-org/jit-runner-kit/actions/provision@v1
+        with:
+          hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
+          github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          server-type: cx33
+          location: fsn1
+          ttl-minutes: 180
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.runner.outputs.state-dir }}
+          retention-days: 1
+
+  workload:
+    needs: provision
+    runs-on: [self-hosted, linux, x64, "${{ needs.provision.outputs.runner-label }}"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run any project CI command
+        run: ./your-ci-command
+
+  cleanup:
+    if: ${{ always() }}
+    needs: [provision, workload]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/jit-runner-state
+      - uses: your-org/jit-runner-kit/actions/destroy@v1
+        with:
+          hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
+          state-dir: ${{ runner.temp }}/jit-runner-state
+          run-key: ${{ needs.provision.outputs.run-key }}
+

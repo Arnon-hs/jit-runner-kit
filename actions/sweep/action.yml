@@ -1,0 +1,25 @@
+name: Sweep expired JIT runners
+description: Delete expired resources managed by jit-runner-kit.
+
+inputs:
+  hcloud-token:
+    description: Hetzner Cloud project token.
+    required: true
+  dry-run:
+    description: Report expired resources without deleting them.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        HCLOUD_TOKEN: ${{ inputs.hcloud-token }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        args=(sweep)
+        if [[ "$INPUT_DRY_RUN" == true ]]; then
+          args+=(--dry-run)
+        fi
+        "${GITHUB_ACTION_PATH}/../../bin/jit-runner" "${args[@]}"
+

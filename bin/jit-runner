@@ -1,0 +1,428 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TF_DIR="${ROOT_DIR}/providers/hetzner"
+GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
+GITHUB_API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
+MANAGED_BY="jit-runner-kit"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  jit-runner provision --repository OWNER/REPO [options]
+  jit-runner destroy --state-dir PATH [--run-key KEY]
+  jit-runner sweep [--dry-run]
+
+Provision options:
+  --repository OWNER/REPO       Target GitHub repository (required)
+  --run-id ID                   Caller run identifier (default: timestamp)
+  --run-attempt NUMBER          Caller run attempt (default: 1)
+  --state-dir PATH              Terraform state directory
+  --server-type TYPE            Hetzner server type (default: cx33)
+  --location LOCATION           Hetzner location (default: fsn1)
+  --image IMAGE                 Hetzner image (default: ubuntu-24.04)
+  --architecture ARCH           x64 or arm64 (default: x64)
+  --ttl-minutes NUMBER          Cleanup deadline (default: 180)
+  --runner-group-id NUMBER      GitHub runner group ID (default: 1)
+  --labels CSV                  Additional GitHub runner labels
+  --ssh-allowed-cidr CIDR       SSH source; auto-detected when omitted
+
+Environment:
+  HCLOUD_TOKEN                  Hetzner Cloud API token
+  JIT_RUNNER_GITHUB_TOKEN       GitHub token with repository Administration write
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+require_secret() {
+  local name="$1"
+  [[ -n "${!name:-}" ]] || die "required environment variable is empty: ${name}"
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    printf '::add-mask::%s\n' "${!name}"
+  fi
+}
+
+validate_repository() {
+  [[ "$1" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid GitHub repository: $1"
+}
+
+validate_positive_integer() {
+  [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "$1 must be a positive integer"
+}
+
+sanitize_key() {
+  local value="$1"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-')"
+  value="${value#-}"
+  value="${value%-}"
+  [[ -n "$value" ]] || die "run key became empty after sanitization"
+  printf '%.48s' "$value"
+}
+
+terraform_init() {
+  terraform -chdir="$TF_DIR" init -input=false -no-color >/dev/null
+}
+
+hcloud_request() {
+  local method="$1"
+  local endpoint="$2"
+  shift 2
+  curl --fail-with-body --silent --show-error \
+    --request "$method" \
+    --header "Authorization: Bearer ${HCLOUD_TOKEN}" \
+    --header 'Content-Type: application/json' \
+    "$@" \
+    "https://api.hetzner.cloud/v1/${endpoint}"
+}
+
+github_request() {
+  local method="$1"
+  local endpoint="$2"
+  shift 2
+  curl --fail-with-body --silent --show-error \
+    --request "$method" \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer ${JIT_RUNNER_GITHUB_TOKEN}" \
+    --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
+    "$@" \
+    "${GITHUB_API_URL}/${endpoint}"
+}
+
+resolve_runner_asset() {
+  local architecture="$1"
+  local asset_name release_json digest
+  asset_name="actions-runner-linux-${architecture}-"
+  release_json="$(curl --fail-with-body --silent --show-error \
+    --header 'Accept: application/vnd.github+json' \
+    "${GITHUB_API_URL}/repos/actions/runner/releases/latest")"
+  RUNNER_ASSET_URL="$(jq -r --arg prefix "$asset_name" '.assets[] | select(.name | startswith($prefix)) | .browser_download_url' <<<"$release_json" | head -1)"
+  digest="$(jq -r --arg prefix "$asset_name" '.assets[] | select(.name | startswith($prefix)) | .digest' <<<"$release_json" | head -1)"
+  [[ -n "$RUNNER_ASSET_URL" && "$RUNNER_ASSET_URL" != null ]] || die "GitHub runner asset not found for ${architecture}"
+  [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || die "GitHub runner asset has no valid SHA-256 digest"
+  RUNNER_ASSET_SHA256="${digest#sha256:}"
+}
+
+generate_jit_config() {
+  local repository="$1"
+  local runner_name="$2"
+  local runner_label="$3"
+  local architecture="$4"
+  local runner_group_id="$5"
+  local extra_labels="$6"
+  local labels_json payload response
+
+  labels_json="$(jq -cn \
+    --arg unique "$runner_label" \
+    --arg arch "$architecture" \
+    --arg extra "$extra_labels" \
+    '(["self-hosted", "linux", $arch, "hetzner", $unique] + ($extra | split(",") | map(select(length > 0)))) | unique')"
+  payload="$(jq -cn \
+    --arg name "$runner_name" \
+    --argjson group "$runner_group_id" \
+    --argjson labels "$labels_json" \
+    '{name: $name, runner_group_id: $group, labels: $labels, work_folder: "_work"}')"
+  response="$(github_request POST "repos/${repository}/actions/runners/generate-jitconfig" --data "$payload")"
+  JIT_CONFIG="$(jq -r '.encoded_jit_config // empty' <<<"$response")"
+  GITHUB_RUNNER_ID="$(jq -r '.runner.id // empty' <<<"$response")"
+  [[ -n "$JIT_CONFIG" && -n "$GITHUB_RUNNER_ID" ]] || die "GitHub did not return a JIT configuration"
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    printf '::add-mask::%s\n' "$JIT_CONFIG"
+  fi
+}
+
+wait_for_ssh() {
+  local ip="$1"
+  local key_file="$2"
+  for _ in $(seq 1 60); do
+    if ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "root@${ip}" true >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  die "SSH did not become ready for ${ip}"
+}
+
+wait_for_runner() {
+  local repository="$1"
+  local runner_id="$2"
+  local status
+  for _ in $(seq 1 60); do
+    status="$(github_request GET "repos/${repository}/actions/runners/${runner_id}" | jq -r '.status // empty')"
+    if [[ "$status" == online ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+  die "GitHub runner ${runner_id} did not become online"
+}
+
+write_output() {
+  local key="$1"
+  local value="$2"
+  printf '%s=%s\n' "$key" "$value"
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    printf '%s=%s\n' "$key" "$value" >>"$GITHUB_OUTPUT"
+  fi
+}
+
+delete_labeled_resources() {
+  local selector="$1"
+  local dry_run="$2"
+  local resource endpoint ids id
+  for resource in servers firewalls primary_ips ssh_keys; do
+    endpoint="$resource"
+    ids="$(hcloud_request GET "$endpoint" --get --data-urlencode "label_selector=${selector}" | jq -r --arg resource "$resource" '.[$resource][].id')"
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      if [[ "$dry_run" == true ]]; then
+        printf 'would-delete %s/%s\n' "$resource" "$id"
+      else
+        hcloud_request DELETE "${endpoint}/${id}" >/dev/null || true
+        printf 'deleted %s/%s\n' "$resource" "$id"
+      fi
+    done <<<"$ids"
+  done
+}
+
+cleanup_failed_provision() {
+  local status="$1"
+  local state_dir="$2"
+  local run_key="$3"
+  local key_file="$4"
+  local repository="$5"
+  set +e
+  printf 'warning: provisioning failed; removing temporary resources\n' >&2
+  rm -f "$key_file" "${key_file}.pub"
+  if [[ -n "${GITHUB_RUNNER_ID:-}" && -n "$repository" && -n "${JIT_RUNNER_GITHUB_TOKEN:-}" ]]; then
+    github_request DELETE "repos/${repository}/actions/runners/${GITHUB_RUNNER_ID}" >/dev/null
+  fi
+  if [[ -n "$state_dir" ]]; then
+    terraform_destroy_from_state "$state_dir" >/dev/null
+  fi
+  if [[ "$run_key" =~ ^[a-z0-9-]+$ && -n "${HCLOUD_TOKEN:-}" ]]; then
+    delete_labeled_resources "managed_by=${MANAGED_BY},run_key=${run_key}" false >/dev/null
+  fi
+  exit "$status"
+}
+
+cmd_provision() {
+  local repository=""
+  local run_id
+  run_id="$(date +%s)"
+  local run_attempt=1
+  local state_dir=""
+  local server_type=cx33
+  local location=fsn1
+  local image=ubuntu-24.04
+  local architecture=x64
+  local ttl_minutes=180
+  local runner_group_id=1
+  local extra_labels=""
+  local ssh_allowed_cidr=""
+  local run_key runner_label runner_name server_name expires_at public_ip public_key
+  local key_file state_file metadata_file controller_ip server_id
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --repository) repository="${2:-}"; shift 2 ;;
+      --run-id) run_id="${2:-}"; shift 2 ;;
+      --run-attempt) run_attempt="${2:-}"; shift 2 ;;
+      --state-dir) state_dir="${2:-}"; shift 2 ;;
+      --server-type) server_type="${2:-}"; shift 2 ;;
+      --location) location="${2:-}"; shift 2 ;;
+      --image) image="${2:-}"; shift 2 ;;
+      --architecture) architecture="${2:-}"; shift 2 ;;
+      --ttl-minutes) ttl_minutes="${2:-}"; shift 2 ;;
+      --runner-group-id) runner_group_id="${2:-}"; shift 2 ;;
+      --labels) extra_labels="${2:-}"; shift 2 ;;
+      --ssh-allowed-cidr) ssh_allowed_cidr="${2:-}"; shift 2 ;;
+      *) die "unknown provision option: $1" ;;
+    esac
+  done
+
+  [[ -n "$repository" ]] || die "--repository is required"
+  validate_repository "$repository"
+  validate_positive_integer ttl-minutes "$ttl_minutes"
+  validate_positive_integer runner-group-id "$runner_group_id"
+  [[ "$architecture" == x64 || "$architecture" == arm64 ]] || die "architecture must be x64 or arm64"
+
+  for command in curl jq ssh ssh-keygen terraform; do require_command "$command"; done
+  require_secret HCLOUD_TOKEN
+  require_secret JIT_RUNNER_GITHUB_TOKEN
+
+  run_key="$(sanitize_key "${repository//\//-}-${run_id}-${run_attempt}")"
+  runner_label="jit-${run_key}"
+  runner_name="$runner_label"
+  server_name="$runner_label"
+  state_dir="${state_dir:-${PWD}/.jit-runner-state/${run_key}}"
+  mkdir -p "$state_dir"
+  state_dir="$(cd "$state_dir" && pwd)"
+  key_file="${state_dir}/runner_ed25519"
+  state_file="${state_dir}/terraform.tfstate"
+  metadata_file="${state_dir}/metadata.json"
+  expires_at="$(( $(date +%s) + ttl_minutes * 60 ))"
+  trap 'cleanup_failed_provision "$?" "$state_dir" "$run_key" "$key_file" "$repository"' EXIT
+
+  if [[ -z "$ssh_allowed_cidr" ]]; then
+    controller_ip="$(curl -4fsS https://api.ipify.org)"
+    [[ "$controller_ip" =~ ^[0-9.]+$ ]] || die "could not detect controller IPv4; pass --ssh-allowed-cidr"
+    ssh_allowed_cidr="${controller_ip}/32"
+  fi
+
+  ssh-keygen -q -t ed25519 -N '' -f "$key_file"
+  public_key="$(<"${key_file}.pub")"
+  terraform_init
+
+  jq -n \
+    --arg run_key "$run_key" \
+    --arg server_name "$server_name" \
+    --arg server_type "$server_type" \
+    --arg location "$location" \
+    --arg image "$image" \
+    --arg public_key "$public_key" \
+    --arg ssh_allowed_cidr "$ssh_allowed_cidr" \
+    --argjson expires_at "$expires_at" \
+    '{run_key:$run_key,server_name:$server_name,server_type:$server_type,location:$location,image:$image,public_key:$public_key,ssh_allowed_cidr:$ssh_allowed_cidr,expires_at:$expires_at}' \
+    >"$metadata_file"
+
+  terraform -chdir="$TF_DIR" apply -input=false -auto-approve -no-color \
+    -state="$state_file" \
+    -var="run_key=${run_key}" \
+    -var="server_name=${server_name}" \
+    -var="server_type=${server_type}" \
+    -var="location=${location}" \
+    -var="image=${image}" \
+    -var="public_key=${public_key}" \
+    -var="ssh_allowed_cidr=${ssh_allowed_cidr}" \
+    -var="expires_at=${expires_at}"
+
+  public_ip="$(terraform -chdir="$TF_DIR" output -state="$state_file" -raw public_ipv4)"
+  server_id="$(terraform -chdir="$TF_DIR" output -state="$state_file" -raw server_id)"
+  wait_for_ssh "$public_ip" "$key_file"
+  ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null "root@${public_ip}" cloud-init status --wait >/dev/null
+
+  resolve_runner_asset "$architecture"
+  generate_jit_config "$repository" "$runner_name" "$runner_label" "$architecture" "$runner_group_id" "$extra_labels"
+
+  {
+    printf '%s\n%s\n%s\n' "$JIT_CONFIG" "$RUNNER_ASSET_URL" "$RUNNER_ASSET_SHA256"
+    cat "${ROOT_DIR}/remote/start-jit-runner.sh"
+  } | ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null "root@${public_ip}" \
+    'IFS= read -r JIT_CONFIG; IFS= read -r RUNNER_ASSET_URL; IFS= read -r RUNNER_ASSET_SHA256; export JIT_CONFIG RUNNER_ASSET_URL RUNNER_ASSET_SHA256; bash -se'
+
+  wait_for_runner "$repository" "$GITHUB_RUNNER_ID"
+  rm -f "$key_file" "${key_file}.pub"
+
+  write_output runner-label "$runner_label"
+  write_output runner-id "$GITHUB_RUNNER_ID"
+  write_output server-id "$server_id"
+  write_output public-ip "$public_ip"
+  write_output run-key "$run_key"
+  write_output state-dir "$state_dir"
+  trap - EXIT
+}
+
+terraform_destroy_from_state() {
+  local state_dir="$1"
+  local metadata_file="${state_dir}/metadata.json"
+  local state_file="${state_dir}/terraform.tfstate"
+  local run_key server_name server_type location image public_key ssh_allowed_cidr expires_at
+  [[ -s "$state_file" && -s "$metadata_file" ]] || return 1
+  run_key="$(jq -r .run_key "$metadata_file")"
+  server_name="$(jq -r .server_name "$metadata_file")"
+  server_type="$(jq -r .server_type "$metadata_file")"
+  location="$(jq -r .location "$metadata_file")"
+  image="$(jq -r .image "$metadata_file")"
+  public_key="$(jq -r .public_key "$metadata_file")"
+  ssh_allowed_cidr="$(jq -r .ssh_allowed_cidr "$metadata_file")"
+  expires_at="$(jq -r .expires_at "$metadata_file")"
+  terraform_init
+  terraform -chdir="$TF_DIR" destroy -input=false -auto-approve -no-color \
+    -state="$state_file" \
+    -var="run_key=${run_key}" \
+    -var="server_name=${server_name}" \
+    -var="server_type=${server_type}" \
+    -var="location=${location}" \
+    -var="image=${image}" \
+    -var="public_key=${public_key}" \
+    -var="ssh_allowed_cidr=${ssh_allowed_cidr}" \
+    -var="expires_at=${expires_at}"
+}
+
+cmd_destroy() {
+  local state_dir=""
+  local run_key=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --state-dir) state_dir="${2:-}"; shift 2 ;;
+      --run-key) run_key="${2:-}"; shift 2 ;;
+      *) die "unknown destroy option: $1" ;;
+    esac
+  done
+  [[ -n "$state_dir" ]] || die "--state-dir is required"
+  for command in curl jq terraform; do require_command "$command"; done
+  require_secret HCLOUD_TOKEN
+  if [[ -z "$run_key" && -s "${state_dir}/metadata.json" ]]; then
+    run_key="$(jq -r '.run_key // empty' "${state_dir}/metadata.json")"
+  fi
+  [[ "$run_key" =~ ^[a-z0-9-]+$ ]] || die "a valid run key is required for safe cleanup"
+
+  if ! terraform_destroy_from_state "$state_dir"; then
+    printf 'warning: Terraform destroy was unavailable or failed; using label cleanup\n' >&2
+  fi
+  delete_labeled_resources "managed_by=${MANAGED_BY},run_key=${run_key}" false
+}
+
+cmd_sweep() {
+  local dry_run=false
+  local now resource response ids id
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run) dry_run=true; shift ;;
+      *) die "unknown sweep option: $1" ;;
+    esac
+  done
+  for command in curl jq; do require_command "$command"; done
+  require_secret HCLOUD_TOKEN
+  now="$(date +%s)"
+  for resource in servers firewalls primary_ips ssh_keys; do
+    response="$(hcloud_request GET "$resource" --get --data-urlencode "label_selector=managed_by=${MANAGED_BY}")"
+    ids="$(jq -r --arg resource "$resource" --argjson now "$now" '.[$resource][] | select((.labels.expires_at // "") | test("^[0-9]+$")) | select((.labels.expires_at | tonumber) <= $now) | .id' <<<"$response")"
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      if [[ "$dry_run" == true ]]; then
+        printf 'would-delete %s/%s\n' "$resource" "$id"
+      else
+        hcloud_request DELETE "${resource}/${id}" >/dev/null || true
+        printf 'deleted %s/%s\n' "$resource" "$id"
+      fi
+    done <<<"$ids"
+  done
+}
+
+main() {
+  local command="${1:-}"
+  [[ -n "$command" ]] || { usage; exit 1; }
+  shift || true
+  case "$command" in
+    provision) cmd_provision "$@" ;;
+    destroy) cmd_destroy "$@" ;;
+    sweep) cmd_sweep "$@" ;;
+    -h|--help|help) usage ;;
+    *) die "unknown command: ${command}" ;;
+  esac
+}
+
+main "$@"

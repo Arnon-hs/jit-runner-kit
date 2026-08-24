@@ -1,0 +1,24 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+  - docker.io
+  - git
+  - jq
+
+users:
+  - default
+  - name: runner
+    gecos: GitHub Actions runner
+    groups:
+      - docker
+    shell: /bin/bash
+    lock_passwd: true
+
+runcmd:
+  - systemctl enable --now docker
+  - install -d -o runner -g runner /opt/actions-runner
+

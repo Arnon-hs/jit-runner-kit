@@ -1,0 +1,32 @@
+name: Destroy ephemeral JIT runner
+description: Destroy a runner and its Hetzner Cloud resources.
+
+inputs:
+  hcloud-token:
+    description: Hetzner Cloud project token.
+    required: true
+  state-dir:
+    description: Downloaded Terraform state directory.
+    required: true
+  run-key:
+    description: Optional run key fallback when metadata is unavailable.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+    - shell: bash
+      env:
+        HCLOUD_TOKEN: ${{ inputs.hcloud-token }}
+        INPUT_STATE_DIR: ${{ inputs.state-dir }}
+        INPUT_RUN_KEY: ${{ inputs.run-key }}
+      run: |
+        args=(destroy --state-dir "$INPUT_STATE_DIR")
+        if [[ -n "$INPUT_RUN_KEY" ]]; then
+          args+=(--run-key "$INPUT_RUN_KEY")
+        fi
+        "${GITHUB_ACTION_PATH}/../../bin/jit-runner" "${args[@]}"
+
