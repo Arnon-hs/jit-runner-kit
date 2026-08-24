@@ -1,34 +1,112 @@
 # jit-runner-kit
 
-Create a clean, one-job GitHub Actions runner on demand, run any job on it, and delete the cloud resources afterwards.
+[![Status: pre-1.0 pilot](https://img.shields.io/badge/status-pre--1.0%20pilot-orange)](ROADMAP.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![OpenTofu](https://img.shields.io/badge/IaC-OpenTofu-ffda18)](https://opentofu.org/)
 
-The toolkit is repository-agnostic. It contains no application deployment logic. The first infrastructure driver targets Hetzner Cloud; the public CLI and action interface is intentionally small so another provider can be added without changing consumer jobs.
+Create a clean, one-job GitHub Actions runner on demand and delete its cloud resources afterward.
 
-## What it does
+`jit-runner-kit` is for maintainers of trusted repositories who want elastic self-hosted runners without keeping an expensive build server online. The public interface is repository-independent and contains no application deployment logic. Hetzner Cloud is the first provider driver; the provider interface is intentionally small so more drivers can be added later.
 
-1. Terraform creates a temporary VM, Primary IPv4, firewall, and one-time SSH key.
-2. The controller asks GitHub for a just-in-time runner configuration.
-3. The configuration is streamed over SSH and is never written to Terraform state or cloud-init.
-4. GitHub assigns exactly one job to the ephemeral runner.
-5. A cleanup job destroys the Terraform resources.
-6. A separate TTL sweep removes resources left behind by cancellation or controller failure.
+> **Project status:** pre-1.0 pilot. The security model is documented, the local and infrastructure checks pass, but the first real-cloud end-to-end run is still pending. Do not treat the current branch as production-stable.
 
-GitHub recommends ephemeral runners for autoscaling. Each runner accepts one job and automatically deregisters after that job: [GitHub self-hosted runner reference](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
+## Why it exists
+
+- Pay for short-lived cloud capacity instead of idle CI machines.
+- Spend zero GitHub-hosted minutes by running the controller outside GitHub Actions.
+- Give every job a fresh VM and a GitHub just-in-time (JIT) runner registration.
+- Limit cleanup blast radius with ownership labels, per-run state, and an independent TTL sweep.
+- Keep application workflows independent from the runner provider implementation.
+
+## Architecture
+
+```text
+queued job with label "jit-runner"
+              |
+              v
+external controller polls GitHub
+              |
+              v
+OpenTofu/Terraform -> temporary Hetzner VM + firewall + IPv4 + SSH key
+              |
+              v
+JIT configuration streamed over SSH -> one GitHub Actions job
+              |
+              v
+runner deregisters -> controller destroys resources -> TTL sweep is the backstop
+```
+
+The JIT configuration is never placed in cloud-init, infrastructure state, or workflow artifacts. The runner package is resolved from the latest official GitHub release and its published SHA-256 digest is verified before extraction.
+
+## Choose an operating mode
+
+| Mode | GitHub-hosted minutes | Best for | Trade-off |
+| --- | ---: | --- | --- |
+| External controller | 0 | Tight Actions budgets and normal operation | Needs a small always-on controller host |
+| Workflow provision/cleanup actions | Two hosted control jobs plus the workload | Evaluation and simple integrations | Still depends on GitHub-hosted jobs and artifact handoff |
+
+The external controller is the recommended mode when the account cannot start GitHub-hosted jobs.
 
 ## Requirements
 
-- Terraform 1.7 or newer
-- `bash`, `curl`, `jq`, `ssh`, and `ssh-keygen`
-- a Hetzner Cloud project token
-- a GitHub fine-grained token with **Administration: write** for the target repository
+Controller host:
 
-The normal workflow `GITHUB_TOKEN` usually cannot generate repository JIT configurations. Keep the runner-administration token separate from application and deployment secrets.
+- Linux or macOS with `bash`, `curl`, `jq`, `ssh`, and `ssh-keygen`
+- OpenTofu 1.7+ (recommended) or Terraform 1.7+
+- a dedicated Hetzner Cloud project token
+- a GitHub fine-grained token scoped to the target repositories with **Actions: read** and **Administration: write**
 
-## GitHub Actions usage
+The normal workflow `GITHUB_TOKEN` usually cannot generate repository JIT configurations. Keep runner administration credentials separate from application and deployment secrets.
 
-Publish this repository and replace `your-org/jit-runner-kit` in the example below with its immutable release tag or commit SHA.
+## Quickstart: zero hosted minutes
 
-While the toolkit repository is private, allow other private repositories owned by the same account to use its actions:
+1. Clone the controller onto a trusted host:
+
+   ```bash
+   git clone https://github.com/Arnon-hs/jit-runner-kit.git
+   cd jit-runner-kit
+   cp examples/controller-config.json controller.json
+   ```
+
+2. Edit `controller.json` and list only repositories the controller may serve.
+
+3. Export credentials without writing them to the repository:
+
+   ```bash
+   export HCLOUD_TOKEN='...'
+   export JIT_RUNNER_GITHUB_TOKEN='...'
+   ```
+
+4. Inspect matching jobs without creating infrastructure:
+
+   ```bash
+   bin/jit-runner-controller --config ./controller.json --once --dry-run
+   ```
+
+5. Start the controller:
+
+   ```bash
+   bin/jit-runner-controller --config ./controller.json
+   ```
+
+6. Route one trusted workflow job to it:
+
+   ```yaml
+   jobs:
+     ci:
+       runs-on: [self-hosted, linux, x64, jit-runner]
+       steps:
+         - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+         - run: ./your-ci-command
+   ```
+
+The controller polls only configured repositories and reacts only to queued jobs containing its trigger label. It creates one VM per job, waits for the JIT runner to deregister or reach its TTL, then deletes the GitHub runner record and cloud resources. See [`examples/controller-config.json`](examples/controller-config.json) and [`examples/zero-hosted-minutes.yml`](examples/zero-hosted-minutes.yml).
+
+## GitHub Actions control-job mode
+
+If GitHub-hosted control jobs are available, the composite actions can provision and destroy a runner from a workflow. Pin the toolkit to an immutable release tag or commit SHA in production.
+
+While this repository is private, allow other private repositories owned by the same account to use its actions:
 
 ```bash
 gh api --method PUT \
@@ -36,86 +114,15 @@ gh api --method PUT \
   -f access_level=user
 ```
 
-This grants workflow access to the action code; it does not share caller secrets with the toolkit repository.
+This shares action code, not caller secrets. The full three-job example and the separate sweeper are in [`examples/github-actions.yml`](examples/github-actions.yml) and [`examples/ttl-sweeper.yml`](examples/ttl-sweeper.yml).
 
-```yaml
-jobs:
-  provision:
-    runs-on: ubuntu-latest
-    outputs:
-      runner-label: ${{ steps.runner.outputs.runner-label }}
-      state-dir: ${{ steps.runner.outputs.state-dir }}
-    steps:
-      - id: runner
-        uses: your-org/jit-runner-kit/actions/provision@v1
-        with:
-          hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
-          github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          server-type: cx33
-          location: fsn1
-      - uses: actions/upload-artifact@v4
-        with:
-          name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.runner.outputs.state-dir }}
-          retention-days: 1
-
-  workload:
-    needs: provision
-    runs-on: [self-hosted, linux, x64, "${{ needs.provision.outputs.runner-label }}"]
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./your-ci-command
-
-  cleanup:
-    if: ${{ always() }}
-    needs: [provision, workload]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/jit-runner-state
-      - uses: your-org/jit-runner-kit/actions/destroy@v1
-        with:
-          hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
-          state-dir: ${{ runner.temp }}/jit-runner-state
-```
-
-The complete consumer and sweeper examples are in [`examples/`](examples/).
-
-## Zero GitHub-hosted minutes
-
-If GitHub-hosted jobs are disabled by budget or billing, run the controller outside GitHub Actions. It can run on a developer machine, an always-on free VM, or a small controller VPS:
-
-```bash
-export HCLOUD_TOKEN=...
-export JIT_RUNNER_GITHUB_TOKEN=...
-
-bin/jit-runner-controller \
-  --config /etc/jit-runner-kit/controller.json
-```
-
-The controller polls only configured repositories and reacts only to queued jobs containing its trigger label. A consumer workflow then needs a single job:
-
-```yaml
-jobs:
-  ci:
-    runs-on: [self-hosted, linux, x64, jit-runner]
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./your-ci-command
-```
-
-The controller creates the VM, waits for the one-job runner to deregister, and destroys the VM. No provisioning or cleanup job runs on GitHub-hosted infrastructure. See [`examples/controller-config.json`](examples/controller-config.json) and [`examples/zero-hosted-minutes.yml`](examples/zero-hosted-minutes.yml).
-
-Use `--once --dry-run` to inspect matching queued jobs without creating cloud resources.
+The actions use OpenTofu by default. Set `iac-engine: terraform` on both `provision` and `destroy` if Terraform is required.
 
 ## Local CLI
 
 ```bash
-export HCLOUD_TOKEN=...
-export JIT_RUNNER_GITHUB_TOKEN=...
+export HCLOUD_TOKEN='...'
+export JIT_RUNNER_GITHUB_TOKEN='...'
 
 bin/jit-runner provision \
   --repository owner/private-repo \
@@ -125,24 +132,30 @@ bin/jit-runner provision \
 bin/jit-runner destroy \
   --state-dir .jit-runner-state/manual-001
 
+bin/jit-runner sweep --dry-run
 bin/jit-runner sweep
 ```
 
-`provision` prints machine-readable `key=value` outputs and also writes them to `$GITHUB_OUTPUT` when it is available.
+`provision` prints machine-readable `key=value` outputs and also writes them to `$GITHUB_OUTPUT` when available. Set `JIT_RUNNER_IAC_CMD=terraform` to override the default OpenTofu-first auto-detection.
 
-## Security and failure model
+## Trust and failure boundaries
 
-- Use only with repositories and contributors you trust. A workflow job can fully control its runner VM.
-- The VM is dedicated to CI and must not share a network or credentials with production workloads.
-- JIT configuration is streamed over SSH. It is not placed in cloud-init, Terraform variables, state, or artifacts.
+- Use the current design only for repositories and contributors you trust. A workflow job fully controls its runner VM.
+- Never expose runner-administration or deployment secrets to untrusted pull-request code.
+- Keep runner VMs outside production networks and accounts.
 - SSH is restricted to the controller's observed public IPv4 by default.
-- Terraform state contains cloud resource metadata and an SSH public key, but no private SSH key or GitHub JIT configuration. Store the artifact only in the private caller workflow and retain it briefly.
-- `if: always()` is not a complete cleanup guarantee. Run the TTL sweeper from a separately scheduled workflow.
-- Ephemeral runner diagnostic logs disappear with the VM. Forward them to external storage before using the toolkit for high-value production pipelines.
+- Infrastructure state contains cloud resource metadata and an SSH public key, but no private key or JIT configuration.
+- `if: always()` is not a cleanup guarantee. Run the TTL sweep independently.
+- Ephemeral logs disappear with the VM. Forward diagnostics before using this for high-value releases.
+- The polling controller is intentionally simple. A webhook-driven, horizontally safe controller is on the roadmap.
+
+Read the full [security policy](SECURITY.md) before operating the toolkit.
 
 ## Cost behavior
 
 Hetzner bills while a server exists, including while it is powered off. Deleting the server and Primary IPv4 stops their respective usage billing. Very short server lifetimes are rounded to at least one hour. See the [Hetzner Cloud billing FAQ](https://docs.hetzner.com/cloud/billing/faq/).
+
+One JIT runner accepts one job. Consolidating related build steps into one job usually matters more for cost than shortening individual steps.
 
 ## Development
 
@@ -150,4 +163,20 @@ Hetzner bills while a server exists, including while it is powered off. Deleting
 make check
 ```
 
-No real cloud resource is created by the test suite.
+Use `make IAC=terraform check` to validate with Terraform. The test suite uses mocks and creates no cloud resources. See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete contributor workflow and [THIRD_PARTY.md](THIRD_PARTY.md) for tooling and license notes.
+
+## Scope and roadmap
+
+The project provisions ephemeral GitHub Actions JIT runners and cleans up their infrastructure. It does not deploy applications, manage application secrets, or provide a general-purpose CI scheduler. See [VISION.md](VISION.md) and [ROADMAP.md](ROADMAP.md).
+
+## Support and community
+
+- Ask usage questions in [GitHub Discussions](https://github.com/Arnon-hs/jit-runner-kit/discussions).
+- Report reproducible bugs with the [bug template](https://github.com/Arnon-hs/jit-runner-kit/issues/new/choose).
+- Read [SUPPORT.md](SUPPORT.md) before opening a support request.
+- Read [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before contributing.
+- Report security issues privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under the [MIT License](LICENSE).

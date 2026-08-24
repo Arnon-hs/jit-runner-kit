@@ -13,9 +13,9 @@ jobs:
     if: ${{ vars.JIT_RUNNER_ENABLED == 'true' }}
     runs-on: [self-hosted, linux, x64, jit-runner]
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
-          terraform_wrapper: false
+          tofu_wrapper: false
       - run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - run: make check

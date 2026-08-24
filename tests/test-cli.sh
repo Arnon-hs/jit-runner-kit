@@ -63,7 +63,7 @@ controller_output="$(PATH="$TEST_TMP/bin:$PATH" JIT_RUNNER_GITHUB_TOKEN=test \
   "$CONTROLLER" --config "$TEST_TMP/controller.json" --once --dry-run)"
 [[ "$controller_output" == "would-provision repository=owner/repository job=999 label=jit-runner" ]]
 
-if grep -RniE 'atlasrepo|arnon-hs' \
+if grep -RniE 'atlasrepo|reposearchengine' \
   --exclude-dir=.git \
   --exclude=test-cli.sh \
   "$ROOT_DIR" >/dev/null; then

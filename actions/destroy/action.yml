@@ -5,8 +5,12 @@ inputs:
   hcloud-token:
     description: Hetzner Cloud project token.
     required: true
+  iac-engine:
+    description: Infrastructure engine to install (opentofu or terraform).
+    required: false
+    default: opentofu
   state-dir:
-    description: Downloaded Terraform state directory.
+    description: Downloaded infrastructure state directory.
     required: true
   run-key:
     description: Optional run key fallback when metadata is unavailable.
@@ -15,12 +19,27 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: hashicorp/setup-terraform@v3
+    - name: Validate infrastructure engine
+      shell: bash
+      env:
+        IAC_ENGINE: ${{ inputs.iac-engine }}
+      run: |
+        case "$IAC_ENGINE" in
+          opentofu|terraform) ;;
+          *) echo "iac-engine must be opentofu or terraform" >&2; exit 1 ;;
+        esac
+    - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+      if: ${{ inputs.iac-engine == 'opentofu' }}
+      with:
+        tofu_wrapper: false
+    - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+      if: ${{ inputs.iac-engine == 'terraform' }}
       with:
         terraform_wrapper: false
     - shell: bash
       env:
         HCLOUD_TOKEN: ${{ inputs.hcloud-token }}
+        JIT_RUNNER_IAC_CMD: ${{ inputs.iac-engine == 'opentofu' && 'tofu' || 'terraform' }}
         INPUT_STATE_DIR: ${{ inputs.state-dir }}
         INPUT_RUN_KEY: ${{ inputs.run-key }}
       run: |
@@ -29,4 +48,3 @@ runs:
           args+=(--run-key "$INPUT_RUN_KEY")
         fi
         "${GITHUB_ACTION_PATH}/../../bin/jit-runner" "${args[@]}"
-

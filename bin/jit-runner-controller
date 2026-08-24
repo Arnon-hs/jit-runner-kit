@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER_CLI="${ROOT_DIR}/bin/jit-runner"
@@ -18,6 +19,7 @@ the GitHub runner deregisters or reaches its TTL.
 Environment:
   JIT_RUNNER_GITHUB_TOKEN   GitHub Actions read and Administration write
   HCLOUD_TOKEN             Hetzner Cloud token (not required for --dry-run)
+  JIT_RUNNER_IAC_CMD        tofu or terraform (default: auto-detect, prefer tofu)
 EOF
 }
 
@@ -222,7 +224,12 @@ main() {
   [[ -n "${JIT_RUNNER_GITHUB_TOKEN:-}" ]] || die "JIT_RUNNER_GITHUB_TOKEN is required"
   if [[ "$dry_run" != true ]]; then
     [[ -n "${HCLOUD_TOKEN:-}" ]] || die "HCLOUD_TOKEN is required"
-    for command in terraform ssh ssh-keygen; do require_command "$command"; done
+    for command in ssh ssh-keygen; do require_command "$command"; done
+    if [[ -n "${JIT_RUNNER_IAC_CMD:-}" ]]; then
+      require_command "$JIT_RUNNER_IAC_CMD"
+    elif ! command -v tofu >/dev/null 2>&1 && ! command -v terraform >/dev/null 2>&1; then
+      die "required command not found: tofu or terraform"
+    fi
   fi
 
   repositories="$(jq -r '.repositories[]' "$config")"

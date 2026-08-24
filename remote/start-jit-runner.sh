@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 : "${JIT_CONFIG:?JIT_CONFIG is required}"
 : "${RUNNER_ASSET_URL:?RUNNER_ASSET_URL is required}"
@@ -19,4 +20,3 @@ rm -f "$archive"
 cd "$install_dir"
 nohup runuser -u runner -- ./run.sh --jitconfig "$JIT_CONFIG" >"$log_file" 2>&1 </dev/null &
 printf 'runner process started with pid %s\n' "$!"
-

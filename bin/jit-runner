@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF_DIR="${ROOT_DIR}/providers/hetzner"
 GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 GITHUB_API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
 MANAGED_BY="jit-runner-kit"
+IAC_CMD="${JIT_RUNNER_IAC_CMD:-}"
 
 usage() {
   cat <<'EOF'
@@ -18,7 +20,7 @@ Provision options:
   --repository OWNER/REPO       Target GitHub repository (required)
   --run-id ID                   Caller run identifier (default: timestamp)
   --run-attempt NUMBER          Caller run attempt (default: 1)
-  --state-dir PATH              Terraform state directory
+  --state-dir PATH              Infrastructure state directory
   --server-type TYPE            Hetzner server type (default: cx33)
   --location LOCATION           Hetzner location (default: fsn1)
   --image IMAGE                 Hetzner image (default: ubuntu-24.04)
@@ -31,6 +33,7 @@ Provision options:
 Environment:
   HCLOUD_TOKEN                  Hetzner Cloud API token
   JIT_RUNNER_GITHUB_TOKEN       GitHub token with repository Administration write
+  JIT_RUNNER_IAC_CMD            tofu or terraform (default: auto-detect, prefer tofu)
 EOF
 }
 
@@ -51,6 +54,22 @@ require_secret() {
   fi
 }
 
+resolve_iac_command() {
+  if [[ -n "$IAC_CMD" ]]; then
+    require_command "$IAC_CMD"
+  elif command -v tofu >/dev/null 2>&1; then
+    IAC_CMD=tofu
+  elif command -v terraform >/dev/null 2>&1; then
+    IAC_CMD=terraform
+  else
+    die "required command not found: tofu or terraform"
+  fi
+}
+
+iac() {
+  "$IAC_CMD" "$@"
+}
+
 validate_repository() {
   [[ "$1" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "invalid GitHub repository: $1"
 }
@@ -68,8 +87,9 @@ sanitize_key() {
   printf '%.48s' "$value"
 }
 
-terraform_init() {
-  terraform -chdir="$TF_DIR" init -input=false -no-color >/dev/null
+iac_init() {
+  resolve_iac_command
+  iac -chdir="$TF_DIR" init -input=false -no-color >/dev/null
 }
 
 hcloud_request() {
@@ -207,7 +227,7 @@ cleanup_failed_provision() {
     github_request DELETE "repos/${repository}/actions/runners/${GITHUB_RUNNER_ID}" >/dev/null
   fi
   if [[ -n "$state_dir" ]]; then
-    terraform_destroy_from_state "$state_dir" >/dev/null
+    iac_destroy_from_state "$state_dir" >/dev/null
   fi
   if [[ "$run_key" =~ ^[a-z0-9-]+$ && -n "${HCLOUD_TOKEN:-}" ]]; then
     delete_labeled_resources "managed_by=${MANAGED_BY},run_key=${run_key}" false >/dev/null
@@ -256,7 +276,8 @@ cmd_provision() {
   validate_positive_integer runner-group-id "$runner_group_id"
   [[ "$architecture" == x64 || "$architecture" == arm64 ]] || die "architecture must be x64 or arm64"
 
-  for command in curl jq ssh ssh-keygen terraform; do require_command "$command"; done
+  for command in curl jq ssh ssh-keygen; do require_command "$command"; done
+  resolve_iac_command
   require_secret HCLOUD_TOKEN
   require_secret JIT_RUNNER_GITHUB_TOKEN
 
@@ -281,7 +302,7 @@ cmd_provision() {
 
   ssh-keygen -q -t ed25519 -N '' -f "$key_file"
   public_key="$(<"${key_file}.pub")"
-  terraform_init
+  iac_init
 
   jq -n \
     --arg run_key "$run_key" \
@@ -295,7 +316,7 @@ cmd_provision() {
     '{run_key:$run_key,server_name:$server_name,server_type:$server_type,location:$location,image:$image,public_key:$public_key,ssh_allowed_cidr:$ssh_allowed_cidr,expires_at:$expires_at}' \
     >"$metadata_file"
 
-  terraform -chdir="$TF_DIR" apply -input=false -auto-approve -no-color \
+  iac -chdir="$TF_DIR" apply -input=false -auto-approve -no-color \
     -state="$state_file" \
     -var="run_key=${run_key}" \
     -var="server_name=${server_name}" \
@@ -306,8 +327,8 @@ cmd_provision() {
     -var="ssh_allowed_cidr=${ssh_allowed_cidr}" \
     -var="expires_at=${expires_at}"
 
-  public_ip="$(terraform -chdir="$TF_DIR" output -state="$state_file" -raw public_ipv4)"
-  server_id="$(terraform -chdir="$TF_DIR" output -state="$state_file" -raw server_id)"
+  public_ip="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw public_ipv4)"
+  server_id="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw server_id)"
   wait_for_ssh "$public_ip" "$key_file"
   ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null "root@${public_ip}" cloud-init status --wait >/dev/null
@@ -334,7 +355,7 @@ cmd_provision() {
   trap - EXIT
 }
 
-terraform_destroy_from_state() {
+iac_destroy_from_state() {
   local state_dir="$1"
   local metadata_file="${state_dir}/metadata.json"
   local state_file="${state_dir}/terraform.tfstate"
@@ -348,8 +369,8 @@ terraform_destroy_from_state() {
   public_key="$(jq -r .public_key "$metadata_file")"
   ssh_allowed_cidr="$(jq -r .ssh_allowed_cidr "$metadata_file")"
   expires_at="$(jq -r .expires_at "$metadata_file")"
-  terraform_init
-  terraform -chdir="$TF_DIR" destroy -input=false -auto-approve -no-color \
+  iac_init
+  iac -chdir="$TF_DIR" destroy -input=false -auto-approve -no-color \
     -state="$state_file" \
     -var="run_key=${run_key}" \
     -var="server_name=${server_name}" \
@@ -372,15 +393,16 @@ cmd_destroy() {
     esac
   done
   [[ -n "$state_dir" ]] || die "--state-dir is required"
-  for command in curl jq terraform; do require_command "$command"; done
+  for command in curl jq; do require_command "$command"; done
+  resolve_iac_command
   require_secret HCLOUD_TOKEN
   if [[ -z "$run_key" && -s "${state_dir}/metadata.json" ]]; then
     run_key="$(jq -r '.run_key // empty' "${state_dir}/metadata.json")"
   fi
   [[ "$run_key" =~ ^[a-z0-9-]+$ ]] || die "a valid run key is required for safe cleanup"
 
-  if ! terraform_destroy_from_state "$state_dir"; then
-    printf 'warning: Terraform destroy was unavailable or failed; using label cleanup\n' >&2
+  if ! iac_destroy_from_state "$state_dir"; then
+    printf 'warning: infrastructure destroy was unavailable or failed; using label cleanup\n' >&2
   fi
   delete_labeled_resources "managed_by=${MANAGED_BY},run_key=${run_key}" false
 }

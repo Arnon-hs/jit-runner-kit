@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage question
+    url: https://github.com/Arnon-hs/jit-runner-kit/discussions
+    about: Ask setup and usage questions in Discussions.
+  - name: Private security report
+    url: https://github.com/Arnon-hs/jit-runner-kit/security/advisories/new
+    about: Never disclose a vulnerability in a public issue.

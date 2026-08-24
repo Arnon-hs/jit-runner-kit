@@ -28,7 +28,7 @@ jobs:
           server-type: cx33
           location: fsn1
           ttl-minutes: 180
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.runner.outputs.state-dir }}
@@ -38,7 +38,7 @@ jobs:
     needs: provision
     runs-on: [self-hosted, linux, x64, "${{ needs.provision.outputs.runner-label }}"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run any project CI command
         run: ./your-ci-command
 
@@ -47,7 +47,7 @@ jobs:
     needs: [provision, workload]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
@@ -57,4 +57,3 @@ jobs:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
           state-dir: ${{ runner.temp }}/jit-runner-state
           run-key: ${{ needs.provision.outputs.run-key }}
-

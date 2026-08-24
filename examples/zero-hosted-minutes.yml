@@ -16,7 +16,6 @@ jobs:
   ci:
     runs-on: [self-hosted, linux, x64, jit-runner]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Run any project CI command
         run: ./your-ci-command
-

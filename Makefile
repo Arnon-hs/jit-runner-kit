@@ -1,6 +1,8 @@
-.PHONY: check shellcheck test terraform-fmt terraform-validate
+IAC ?= tofu
 
-check: shellcheck test terraform-fmt terraform-validate
+.PHONY: check shellcheck test iac-fmt iac-validate
+
+check: shellcheck test iac-fmt iac-validate
 
 shellcheck:
 	shellcheck bin/jit-runner bin/jit-runner-controller remote/start-jit-runner.sh tests/test-cli.sh
@@ -8,9 +10,9 @@ shellcheck:
 test:
 	bash tests/test-cli.sh
 
-terraform-fmt:
-	terraform -chdir=providers/hetzner fmt -check -recursive
+iac-fmt:
+	$(IAC) -chdir=providers/hetzner fmt -check -recursive
 
-terraform-validate:
-	terraform -chdir=providers/hetzner init -backend=false -input=false
-	terraform -chdir=providers/hetzner validate
+iac-validate:
+	$(IAC) -chdir=providers/hetzner init -backend=false -input=false
+	$(IAC) -chdir=providers/hetzner validate
