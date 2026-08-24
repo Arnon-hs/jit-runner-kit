@@ -14,6 +14,7 @@ install -d -o runner -g runner "$install_dir"
 curl --fail-with-body --location --silent --show-error "$RUNNER_ASSET_URL" --output "$archive"
 printf '%s  %s\n' "$RUNNER_ASSET_SHA256" "$archive" | sha256sum --check --status
 tar -xzf "$archive" -C "$install_dir"
+"$install_dir/bin/installdependencies.sh"
 chown -R runner:runner "$install_dir"
 rm -f "$archive"
 

@@ -3,11 +3,17 @@ package_update: true
 package_upgrade: false
 
 packages:
+  - build-essential
   - ca-certificates
   - curl
   - docker.io
+  - docker-compose-v2
+  - gh
   - git
   - jq
+  - python3
+  - shellcheck
+  - unzip
 
 users:
   - default
@@ -21,4 +27,3 @@ users:
 runcmd:
   - systemctl enable --now docker
   - install -d -o runner -g runner /opt/actions-runner
-
