@@ -13,7 +13,7 @@ jobs:
     if: ${{ vars.JIT_RUNNER_ENABLED == 'true' }}
     runs-on: [self-hosted, linux, x64, jit-runner]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
         with:
           tofu_wrapper: false
