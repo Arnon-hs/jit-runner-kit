@@ -1,8 +1,15 @@
-# jit-runner-kit
+<div align="center">
+  <img src="docs/images/jit-runner-mark.svg" width="72" alt="JIT Runner Kit" />
+  <h1>JIT Runner Kit</h1>
+  <p><strong>Fresh GitHub Actions runners. One job, one VM, zero idle compute.</strong></p>
+  <p><a href="#quickstart-zero-hosted-minutes">Quickstart</a> · <a href="#architecture">Architecture</a> · <a href="SECURITY.md">Security</a> · <a href="CONTRIBUTING.md">Contributing</a> · <a href="https://github.com/Arnon-hs/jit-runner-kit/discussions">Discussions</a></p>
+  <a href="https://github.com/Arnon-hs/jit-runner-kit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Arnon-hs/jit-runner-kit/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="ROADMAP.md"><img alt="Pre-1.0 pilot" src="https://img.shields.io/badge/status-pre--1.0%20pilot-f59e0b.svg" /></a>
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-4f46e5.svg" /></a>
+  <a href="https://opentofu.org/"><img alt="OpenTofu" src="https://img.shields.io/badge/IaC-OpenTofu-ffda18.svg" /></a>
+</div>
 
-[![Status: pre-1.0 pilot](https://img.shields.io/badge/status-pre--1.0%20pilot-orange)](ROADMAP.md)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![OpenTofu](https://img.shields.io/badge/IaC-OpenTofu-ffda18)](https://opentofu.org/)
+> Provider-independent, MIT-licensed infrastructure for trusted repositories that need elastic self-hosted CI without an always-on build fleet.
 
 Create a clean, one-job GitHub Actions runner on demand and delete its cloud resources afterward.
 
