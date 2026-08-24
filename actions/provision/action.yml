@@ -75,11 +75,11 @@ runs:
           opentofu|terraform) ;;
           *) echo "iac-engine must be opentofu or terraform" >&2; exit 1 ;;
         esac
-    - uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
+    - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
       if: ${{ inputs.iac-engine == 'opentofu' }}
       with:
         tofu_wrapper: false
-    - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+    - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
       if: ${{ inputs.iac-engine == 'terraform' }}
       with:
         terraform_wrapper: false
