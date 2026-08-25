@@ -16,6 +16,11 @@ on:
         required: true
         default: 180
         type: number
+      hold-seconds:
+        description: Keep the workload active for cancellation canaries
+        required: true
+        default: 0
+        type: number
   pull_request:
   push:
     branches: [main]
@@ -75,6 +80,9 @@ jobs:
         with:
           tofu_version: 1.12.6
           tofu_wrapper: false
+      - name: Hold cancellation canary
+        if: inputs.hold-seconds > 0
+        run: sleep "${{ inputs.hold-seconds }}"
       - name: Run successful workload canary
         if: inputs.workload-mode == 'success'
         run: make check
