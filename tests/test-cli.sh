@@ -30,13 +30,20 @@ set -Eeuo pipefail
 url="${*: -1}"
 printf '%s\n' "$url" >>"$MOCK_CURL_LOG"
 case "$url" in
+  https://api.ipify.org) printf '192.0.2.10' ;;
+  */repos/actions/runner/releases/latest)
+    printf '{"assets":[{"name":"actions-runner-linux-x64-test.tar.gz","browser_download_url":"https://example.invalid/runner.tar.gz","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+    ;;
+  */generate-jitconfig)
+    printf '{"encoded_jit_config":"test-jit-config","runner":{"id":888}}\n201'
+    ;;
   */servers)
     printf '{"servers":[{"id":101,"labels":{"expires_at":"1"}},{"id":102,"labels":{"expires_at":"4102444800"}},{"id":103,"labels":{}}]}'
     ;;
   */firewalls) printf '{"firewalls":[]}' ;;
   */primary_ips) printf '{"primary_ips":[]}' ;;
   */ssh_keys) printf '{"ssh_keys":[]}' ;;
-  */repos/owner/repository/actions/runners/777) printf '204' ;;
+  */repos/owner/repository/actions/runners/[0-9]*) printf '204' ;;
   */servers/[0-9]*|*/firewalls/[0-9]*|*/primary_ips/[0-9]*|*/ssh_keys/[0-9]*) ;;
   */actions/runs\?status=queued\&per_page=20)
     printf '{"workflow_runs":[{"id":55}]}'
@@ -53,9 +60,36 @@ MOCK_CURL
 chmod +x "$TEST_TMP/bin/curl"
 cat >"$TEST_TMP/bin/tofu" <<'MOCK_TOFU'
 #!/usr/bin/env bash
+for argument in "$@"; do
+  case "$argument" in
+    -state=*) state_file="${argument#-state=}" ;;
+  esac
+done
+case " $* " in
+  *" apply "*) : >"$state_file" ;;
+  *" output "*" public_ipv4 "*) printf '192.0.2.20' ;;
+  *" output "*" server_id "*) printf '123' ;;
+esac
 exit 0
 MOCK_TOFU
 chmod +x "$TEST_TMP/bin/tofu"
+cat >"$TEST_TMP/bin/ssh-keygen" <<'MOCK_SSH_KEYGEN'
+#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == -f ]]; then
+    key_file="$2"
+    break
+  fi
+  shift
+done
+: >"$key_file"
+printf 'ssh-ed25519 test-key test@runner\n' >"${key_file}.pub"
+MOCK_SSH_KEYGEN
+chmod +x "$TEST_TMP/bin/ssh-keygen"
+printf '#!/usr/bin/env bash\nexit 255\n' >"$TEST_TMP/bin/ssh"
+chmod +x "$TEST_TMP/bin/ssh"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$TEST_TMP/bin/sleep"
+chmod +x "$TEST_TMP/bin/sleep"
 
 sweep_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" sweep --dry-run)"
 [[ "$sweep_output" == "would-delete servers/101" ]]
@@ -70,6 +104,17 @@ PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test JIT_RUNNER_GITHUB
     --repository owner/repository \
     --runner-id 777 >/dev/null
 grep -q '/repos/owner/repository/actions/runners/777$' "$MOCK_CURL_LOG"
+
+set +e
+provision_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test \
+  JIT_RUNNER_GITHUB_TOKEN=test "$CLI" provision --repository owner/repository \
+  --run-id 123 --state-dir "$TEST_TMP/failed-provision-state" 2>&1)"
+provision_status=$?
+set -e
+[[ $provision_status -ne 0 ]]
+[[ "$provision_output" == *"provisioning failed; removing temporary resources"* ]]
+[[ "$provision_output" != *"unbound variable"* ]]
+grep -q '/repos/owner/repository/actions/runners/888$' "$MOCK_CURL_LOG"
 
 cat >"$TEST_TMP/controller.json" <<EOF
 {

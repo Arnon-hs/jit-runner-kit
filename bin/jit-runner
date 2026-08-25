@@ -8,6 +8,10 @@ GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 GITHUB_API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
 MANAGED_BY="jit-runner-kit"
 IAC_CMD="${JIT_RUNNER_IAC_CMD:-}"
+PROVISION_STATE_DIR=""
+PROVISION_RUN_KEY=""
+PROVISION_KEY_FILE=""
+PROVISION_REPOSITORY=""
 
 usage() {
   cat <<'EOF'
@@ -265,6 +269,20 @@ wait_for_ssh() {
   die "SSH did not become ready for ${ip}"
 }
 
+wait_for_cloud_init() {
+  local ip="$1"
+  local key_file="$2"
+  for _ in $(seq 1 60); do
+    if ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+      "root@${ip}" cloud-init status --wait >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  die "cloud-init did not become ready for ${ip}"
+}
+
 wait_for_runner() {
   local repository="$1"
   local runner_id="$2"
@@ -309,21 +327,18 @@ delete_labeled_resources() {
 
 cleanup_failed_provision() {
   local status="$1"
-  local state_dir="$2"
-  local run_key="$3"
-  local key_file="$4"
-  local repository="$5"
+  trap - EXIT
   set +e
   printf 'warning: provisioning failed; removing temporary resources\n' >&2
-  rm -f "$key_file" "${key_file}.pub"
-  if [[ -n "${GITHUB_RUNNER_ID:-}" && -n "$repository" && -n "${JIT_RUNNER_GITHUB_TOKEN:-}" ]]; then
-    github_request DELETE "repos/${repository}/actions/runners/${GITHUB_RUNNER_ID}" >/dev/null
+  rm -f "$PROVISION_KEY_FILE" "${PROVISION_KEY_FILE}.pub"
+  if [[ -n "${GITHUB_RUNNER_ID:-}" && -n "$PROVISION_REPOSITORY" && -n "${JIT_RUNNER_GITHUB_TOKEN:-}" ]]; then
+    github_request DELETE "repos/${PROVISION_REPOSITORY}/actions/runners/${GITHUB_RUNNER_ID}" >/dev/null
   fi
-  if [[ -n "$state_dir" ]]; then
-    iac_destroy_from_state "$state_dir" >/dev/null
+  if [[ -n "$PROVISION_STATE_DIR" ]]; then
+    iac_destroy_from_state "$PROVISION_STATE_DIR" >/dev/null
   fi
-  if [[ "$run_key" =~ ^[a-z0-9-]+$ && -n "${HCLOUD_TOKEN:-}" ]]; then
-    delete_labeled_resources "managed_by=${MANAGED_BY},run_key=${run_key}" false >/dev/null
+  if [[ "$PROVISION_RUN_KEY" =~ ^[a-z0-9-]+$ && -n "${HCLOUD_TOKEN:-}" ]]; then
+    delete_labeled_resources "managed_by=${MANAGED_BY},run_key=${PROVISION_RUN_KEY}" false >/dev/null
   fi
   exit "$status"
 }
@@ -385,10 +400,19 @@ cmd_provision() {
   state_file="${state_dir}/terraform.tfstate"
   metadata_file="${state_dir}/metadata.json"
   expires_at="$(( $(date +%s) + ttl_minutes * 60 ))"
-  trap 'cleanup_failed_provision "$?" "$state_dir" "$run_key" "$key_file" "$repository"' EXIT
+  PROVISION_STATE_DIR="$state_dir"
+  PROVISION_RUN_KEY="$run_key"
+  PROVISION_KEY_FILE="$key_file"
+  PROVISION_REPOSITORY="$repository"
+  trap 'cleanup_failed_provision "$?"' EXIT
+
+  write_output run-key "$run_key"
+  write_output state-dir "$state_dir"
 
   resolve_runner_asset "$architecture"
   generate_jit_config "$repository" "$runner_name" "$runner_label" "$architecture" "$runner_group_id" "$extra_labels"
+  write_output runner-label "$runner_label"
+  write_output runner-id "$GITHUB_RUNNER_ID"
 
   if [[ -z "$ssh_allowed_cidr" ]]; then
     controller_ip="$(curl -4fsS https://api.ipify.org)"
@@ -428,8 +452,8 @@ cmd_provision() {
   public_ip="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw public_ipv4)"
   server_id="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw server_id)"
   wait_for_ssh "$public_ip" "$key_file"
-  ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null "root@${public_ip}" cloud-init status --wait >/dev/null
+  wait_for_cloud_init "$public_ip" "$key_file"
+  wait_for_ssh "$public_ip" "$key_file"
 
   {
     printf '%s\n%s\n%s\n' "$JIT_CONFIG" "$RUNNER_ASSET_URL" "$RUNNER_ASSET_SHA256"
@@ -441,12 +465,8 @@ cmd_provision() {
   wait_for_runner "$repository" "$GITHUB_RUNNER_ID"
   rm -f "$key_file" "${key_file}.pub"
 
-  write_output runner-label "$runner_label"
-  write_output runner-id "$GITHUB_RUNNER_ID"
   write_output server-id "$server_id"
   write_output public-ip "$public_ip"
-  write_output run-key "$run_key"
-  write_output state-dir "$state_dir"
   trap - EXIT
 }
 

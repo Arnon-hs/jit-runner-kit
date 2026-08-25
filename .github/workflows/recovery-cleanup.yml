@@ -1,0 +1,37 @@
+name: Recovery cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-key:
+        description: Exact jit-runner-kit run_key label
+        required: true
+        type: string
+      repository:
+        description: GitHub OWNER/REPO containing the stale runner
+        required: true
+        type: string
+      runner-id:
+        description: Numeric stale GitHub runner ID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    name: Remove one runner and its labeled resources
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./actions/destroy
+        with:
+          hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
+          github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
+          state-dir: ${{ runner.temp }}/missing-state
+          run-key: ${{ inputs.run-key }}
+          repository: ${{ inputs.repository }}
+          runner-id: ${{ inputs.runner-id }}
