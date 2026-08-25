@@ -49,6 +49,8 @@ The Hetzner image installs Docker with Compose v2, GitHub CLI, ShellCheck, PHP C
 
 Need another shell, language runtime, or system library? The runner image is deliberately built from a small, readable cloud-init file. See [Customize the runner image](docs/custom-runner-image.md) for safe package-list changes, Bash/Zsh/Fish examples, third-party repository guidance, custom images, and validation steps.
 
+Need concurrent jobs or an always-on controller? See [Operate the controller](docs/controller-operations.md) for the control-plane roles, one-VM-per-job isolation model, `max_runners` sizing, macOS/Linux service guidance, and recovery checks.
+
 ## Choose an operating mode
 
 | Mode | GitHub-hosted minutes | Best for | Trade-off |
@@ -112,6 +114,8 @@ The normal workflow `GITHUB_TOKEN` usually cannot generate repository JIT config
    ```
 
 The controller polls only configured repositories and reacts only to queued jobs containing its trigger label. It creates one VM per job, waits for the JIT runner to deregister or reach its TTL, then deletes the GitHub runner record and cloud resources. GitHub JIT-configuration throttling is retried according to GitHub's rate-limit response; the request runs before cloud provisioning so an API rejection does not create a billable VM. See [`examples/controller-config.json`](examples/controller-config.json) and [`examples/zero-hosted-minutes.yml`](examples/zero-hosted-minutes.yml).
+
+Set `max_runners` above `1` to run multiple jobs concurrently. Every active job still receives a separate ephemeral VM; the setting limits concurrency rather than placing multiple jobs on one shared worker.
 
 ## GitHub Actions control-job mode
 
