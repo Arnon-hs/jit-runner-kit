@@ -30,17 +30,35 @@ export class HetznerComputeProvider implements ComputeProvider {
   constructor(
     private readonly config: HetznerConfig,
     private readonly fetcher: typeof fetch = fetch,
+    private readonly sleep: (milliseconds: number) => Promise<void> =
+      (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   ) {
     this.apiUrl = config.apiUrl ?? "https://api.hetzner.cloud/v1";
   }
 
   async create(request: ComputeCreateRequest): Promise<ComputeResource> {
+    const labels = resourceLabels(request);
     const existing = await this.findServer(request.jobKey);
-    if (existing) return this.toResource(existing, await this.findFirewall(request.jobKey), request.expiresAt);
+    if (existing) {
+      if (sameBootstrap(existing, request)) {
+        return this.toResource(
+          existing,
+          await this.findFirewall(request.jobKey, request.provisioningAttempt),
+          request.expiresAt,
+        );
+      }
+      if (attemptOf(existing) > request.provisioningAttempt) {
+        throw new RetryableError("a newer provisioning attempt already owns this job", 5);
+      }
+      await this.delete(this.toResource(
+        existing,
+        await this.findFirewall(request.jobKey, attemptOf(existing)),
+        request.expiresAt,
+      ));
+    }
 
-    const labels = resourceLabels(request.jobKey, request.repository, request.expiresAt);
     const firewall =
-      (await this.findFirewall(request.jobKey)) ??
+      (await this.findFirewall(request.jobKey, request.provisioningAttempt)) ??
       (
         await this.request<{ firewall: HetznerFirewall }>("/firewalls", {
           method: "POST",
@@ -48,7 +66,7 @@ export class HetznerComputeProvider implements ComputeProvider {
         })
       ).firewall;
 
-    let createdServer: HetznerServer | undefined;
+    let createdServer: HetznerServer;
     try {
       const created = await this.request<{ server: HetznerServer }>("/servers", {
         method: "POST",
@@ -65,6 +83,32 @@ export class HetznerComputeProvider implements ComputeProvider {
         }),
       });
       createdServer = created.server;
+    } catch (error) {
+      if (error instanceof RetryableError) {
+        const recovered = await this.recoverServer(request.jobKey);
+        if (!recovered) {
+          // Keep the firewall: the server may become visible after this request ends.
+          throw new RetryableError(`Hetzner create outcome remains ambiguous: ${error.message}`, 30);
+        }
+        if (!sameBootstrap(recovered, request)) {
+          if (attemptOf(recovered) > request.provisioningAttempt) {
+            throw new RetryableError("a newer provisioning attempt won ambiguous-create recovery", 5);
+          }
+          await this.delete(this.toResource(
+            recovered,
+            await this.findFirewall(request.jobKey, attemptOf(recovered)),
+            request.expiresAt,
+          ));
+          throw new RetryableError("removed a server created with a stale bootstrap token", 5);
+        }
+        createdServer = recovered;
+      } else {
+        await this.deleteId("firewalls", firewall.id);
+        throw error;
+      }
+    }
+
+    try {
       const ipv4 = createdServer.public_net.ipv4;
       if (!ipv4) throw new TerminalError("Hetzner server has no public IPv4");
       await this.request(`/primary_ips/${ipv4.id}`, {
@@ -74,35 +118,14 @@ export class HetznerComputeProvider implements ComputeProvider {
       return this.toResource(createdServer, firewall, request.expiresAt);
     } catch (error) {
       const rollbackErrors: unknown[] = [];
-      let serverLookupFailed = false;
-      if (!createdServer) {
+      for (const [resource, id] of [
+        ["servers", createdServer.id],
+        ["primary_ips", createdServer.public_net.ipv4?.id],
+        ["firewalls", firewall.id],
+      ] as const) {
+        if (id === undefined) continue;
         try {
-          createdServer = await this.findServer(request.jobKey);
-        } catch (rollbackError) {
-          serverLookupFailed = true;
-          rollbackErrors.push(rollbackError);
-        }
-      }
-      let serverDeleted = !createdServer && !serverLookupFailed;
-      if (createdServer) {
-        try {
-          await this.deleteId("servers", createdServer.id);
-          serverDeleted = true;
-        } catch (rollbackError) {
-          rollbackErrors.push(rollbackError);
-        }
-      }
-      if (serverDeleted) {
-        const ipv4 = createdServer?.public_net.ipv4;
-        if (ipv4) {
-          try {
-            await this.deleteId("primary_ips", ipv4.id);
-          } catch (rollbackError) {
-            rollbackErrors.push(rollbackError);
-          }
-        }
-        try {
-          await this.deleteId("firewalls", firewall.id);
+          await this.deleteId(resource, id);
         } catch (rollbackError) {
           rollbackErrors.push(rollbackError);
         }
@@ -154,8 +177,19 @@ export class HetznerComputeProvider implements ComputeProvider {
     return (await this.list<HetznerServer>("servers", jobKey))[0];
   }
 
-  private async findFirewall(jobKey: string): Promise<HetznerFirewall | undefined> {
-    return (await this.list<HetznerFirewall>("firewalls", jobKey))[0];
+  private async findFirewall(jobKey: string, provisioningAttempt: number): Promise<HetznerFirewall | undefined> {
+    return (await this.list<HetznerFirewall>("firewalls", jobKey))
+      .find((firewall) => attemptOfLabels(firewall.labels) === provisioningAttempt);
+  }
+
+  private async recoverServer(jobKey: string): Promise<HetznerServer | undefined> {
+    const delays = [0, 100, 250, 500, 1_000];
+    for (const delay of delays) {
+      if (delay > 0) await this.sleep(delay);
+      const server = await this.findServer(jobKey);
+      if (server) return server;
+    }
+    return undefined;
   }
 
   private async list<T>(resource: string, jobKey?: string): Promise<T[]> {
@@ -197,31 +231,59 @@ export class HetznerComputeProvider implements ComputeProvider {
   }
 
   private async request<T = unknown>(path: string, init: RequestInit, allowMissing = false): Promise<T> {
-    const response = await this.fetcher(`${this.apiUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.config.token}`,
-        "Content-Type": "application/json",
-      },
-    });
-    if (response.ok) return (response.status === 204 ? undefined : await response.json()) as T;
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.apiUrl}${path}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${this.config.token}`,
+          "Content-Type": "application/json",
+        },
+      });
+    } catch (error) {
+      throw new RetryableError(`Hetzner API transport failure: ${errorMessage(error)}`, 30);
+    }
+    if (response.ok) {
+      if (response.status === 204) return undefined as T;
+      try {
+        return await response.json() as T;
+      } catch {
+        throw new RetryableError(`Hetzner API ${response.status} returned an invalid response`, 30);
+      }
+    }
     if (allowMissing && response.status === 404) return undefined as T;
     const body = await safeError(response);
-    if (response.status === 429 || response.status === 423 || response.status >= 500) {
+    if (response.status === 409 || response.status === 429 || response.status === 423 || response.status >= 500) {
       throw new RetryableError(`Hetzner API ${response.status}: ${body}`, 30);
     }
     throw new TerminalError(`Hetzner API ${response.status}: ${body}`);
   }
 }
 
-function resourceLabels(jobKey: string, repository: string, expiresAt: number): Record<string, string> {
+function resourceLabels(request: ComputeCreateRequest): Record<string, string> {
   return {
     managed_by: "jit-runner-kit",
     controller: "cloudflare",
-    job_key: jobKey,
-    repository: repository.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").slice(0, 63),
-    expires_at: String(expiresAt),
+    job_key: request.jobKey,
+    repository: request.repository.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").slice(0, 63),
+    expires_at: String(request.expiresAt),
+    provisioning_attempt: String(request.provisioningAttempt),
+    bootstrap_hash: request.bootstrapTokenHash.slice(0, 32),
   };
+}
+
+function sameBootstrap(server: HetznerServer, request: ComputeCreateRequest): boolean {
+  return attemptOf(server) === request.provisioningAttempt &&
+    server.labels.bootstrap_hash === request.bootstrapTokenHash.slice(0, 32);
+}
+
+function attemptOf(server: HetznerServer): number {
+  return attemptOfLabels(server.labels);
+}
+
+function attemptOfLabels(labels: Record<string, string>): number {
+  const attempt = Number(labels.provisioning_attempt);
+  return Number.isSafeInteger(attempt) && attempt >= 0 ? attempt : -1;
 }
 
 function isExpired(labels: Record<string, string>, now: number): boolean {

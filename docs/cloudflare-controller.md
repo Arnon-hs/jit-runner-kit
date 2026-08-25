@@ -6,7 +6,8 @@ Status: controlled canary. The Worker compiles and the provider-agnostic lifecyc
 
 ```text
 GitHub workflow_job webhook
-  -> signature + allowlist + branch + static label + run-scoped label + non-PR trust gate
+  -> signature + allowlist + branch + labels + non-PR trust gate
+  -> private organization runner group restricted to exact trusted workflows
   -> Cloudflare Queue
   -> singleton SQLite Durable Object (job CAS + global leases)
   -> Hetzner API (deny-inbound VM, no SSH)
@@ -26,17 +27,22 @@ GitHub remains the workflow scheduler. Cloudflare becomes the JIT lifecycle cont
 
 - A Cloudflare account with Workers, Queues, Durable Objects, and Cron Triggers available.
 - A dedicated Hetzner Cloud project and read/write API token.
-- A GitHub App installed only on repositories the controller may serve.
+- A GitHub organization containing the private repositories the controller may serve.
+- A dedicated organization runner group restricted to an exact list of trusted workflows.
+- A GitHub App installed only on those repositories and granted access to the runner group.
 - Node.js 22 and npm.
 
 Create the GitHub App with:
 
 - Webhook event: **Workflow jobs** only.
-- Repository permissions: **Actions: read**, **Administration: read and write**, **Metadata: read**.
+- Repository permissions: **Actions: read**, **Metadata: read**.
+- Organization permissions: **Self-hosted runners: read and write**.
 - Webhook URL: `https://YOUR_CONTROLLER/webhooks/github`.
 - A random webhook secret.
 
 Do not enable the controller for public-fork or pull-request jobs. This implementation rejects every queued job with a non-empty `pull_requests` array.
+
+Create a dedicated organization runner group with public-repository access disabled, workflow access enabled, and only explicitly trusted workflow paths selected. Pin every selected path to `refs/heads/main` (or another protected branch) or a full commit SHA. The controller verifies that the live group policy exactly matches `TRUSTED_WORKFLOWS` before it creates compute. Personal-account repositories are intentionally unsupported in this secure serverless mode; use the GitHub control-job adapter for them.
 
 ## Configure Cloudflare
 
@@ -52,8 +58,11 @@ Edit `packages/adapter-controller-cloudflare/wrangler.jsonc`:
 
 - set `ALLOWED_REPOSITORIES` to a comma-separated `owner/repository` allowlist;
 - set `TRUSTED_BRANCHES` to explicit branch names;
-- keep `RUN_LABEL_PREFIX` non-empty and route jobs with `jit-run-${{ github.run_id }}`;
+- set `GITHUB_ORGANIZATION` and the dedicated `RUNNER_GROUP_ID`;
+- set `TRUSTED_WORKFLOWS` to the exact comma-separated selected-workflow list from the runner group;
+- keep `RUN_LABEL_PREFIX` non-empty and route jobs with `jit-run-${{ github.run_id }}` as defense in depth;
 - keep `MAX_RUNNERS` at `1` for the first canary, then at most `2` initially;
+- keep `PROVISIONING_TIMEOUT_SECONDS` long enough for normal API calls (the default is 300); stale attempts are claimed again after this window;
 - set `PUBLIC_BASE_URL` to the final HTTPS Worker or custom-domain origin;
 - select a Hetzner server type, location, image, architecture, and TTL.
 
@@ -93,12 +102,14 @@ jobs:
       - run: ./your-ci-command
 ```
 
-The webhook payload labels become the JIT runner labels. `jit-run-${{ github.run_id }}` prevents an older queued pull-request run with otherwise identical labels from taking a runner created for a trusted run. Jobs inside the same trusted run share that security boundary; every queued job still receives a separate VM. The controller rejects both queued and completed events that do not carry the expected run-scoped label.
+The webhook payload labels become the JIT runner labels. The run-scoped label reduces accidental cross-routing, but GitHub's JIT API does not bind a runner to a job ID and labels are visible to repository workflows. The security boundary is the private organization runner group restricted to the exact trusted workflow definitions. Every queued job still receives a separate VM, and the controller rejects both queued and completed events that do not carry the expected run-scoped label.
 
 ## Security properties
 
 - `X-Hub-Signature-256` is verified with HMAC-SHA256 before JSON parsing or queueing.
 - The provider-agnostic core enforces repository, branch, trigger-label, run-scoped-label, and no-PR policy for both queued and completed events.
+- Before provisioning, the GitHub adapter verifies that the repository belongs to the configured organization and the dedicated runner group is private and restricted to exactly `TRUSTED_WORKFLOWS`.
+- The runner-group policy is verified again immediately before JIT configuration is generated, so policy drift during VM startup fails closed.
 - The Queue carries identifiers and lifecycle state, never credentials or JIT configuration.
 - The Durable Object stores only a SHA-256 digest of the bootstrap token.
 - Bootstrap also requires the request's observed public IPv4 to equal the created VM's IPv4.
@@ -114,7 +125,7 @@ Run these in a dedicated Hetzner project and a non-production GitHub repository:
 
 1. Valid signed queued event provisions exactly one VM and one runner.
 2. Duplicate webhook delivery does not provision a second VM.
-3. Wrong repository, branch, missing static/run-scoped label, PR association, signature, token, and source IP create no compute.
+3. Wrong organization, repository, branch, workflow-group policy, missing static/run-scoped label, PR association, signature, token, and source IP create no compute.
 4. Successful workload removes the runner, server, Primary IPv4, and firewall.
 5. Intentionally failed workload performs the same cleanup.
 6. Cancelled workflow is cleaned by completed delivery or TTL reconciliation.
@@ -122,6 +133,7 @@ Run these in a dedicated Hetzner project and a non-production GitHub repository:
 8. A deliberately orphaned expired labeled resource is removed by Cron/provider reconciliation.
 9. The existing GitHub control-job fallback still passes.
 10. `bin/jit-runner inventory --require-empty` reports zero managed Hetzner resources.
+11. A workflow outside the runner group's selected list cannot acquire a runner even if it copies all runner labels.
 
 Until all gates pass, keep production workflows on the GitHub control-job adapter.
 
@@ -131,6 +143,9 @@ Until all gates pass, keep production workflows on the GitHub control-job adapte
 - The Durable Object alarm reconciles the earliest active job expiry.
 - Cron invokes the same reconciliation independently and sweeps provider labels, including state-orphaned resources.
 - Reconciliation attempts all job and provider cleanup paths even when one runner or VM deletion fails, then reports one retryable aggregate failure.
+- Capacity-lease retention is a fail-closed precondition: if Durable Object storage cannot extend it, reconciliation performs no external deletion and retries later.
+- A stale provisioning claim is retried after `PROVISIONING_TIMEOUT_SECONDS`; a failed VM deletion extends its concurrency lease until a later cleanup succeeds.
+- Every provider resource carries a monotonic provisioning-attempt fence. An older, slow API call cannot adopt or delete a newer attempt's VM.
 - Completed and failed Durable Object records are pruned after a bounded retention window of at least 24 hours.
 - Queue messages retry only retryable upstream or concurrency failures. Terminal trust/auth/configuration failures are acknowledged and logged without their secret values.
 - Inspect the DLQ before replay. Correct the cause first; do not bulk replay unknown tasks.

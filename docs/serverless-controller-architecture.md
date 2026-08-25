@@ -8,8 +8,10 @@ JIT Runner Kit keeps lifecycle policy in a provider-agnostic core and puts deplo
 
 - One workflow job receives one VM and one JIT registration.
 - Only authenticated, allowlisted `workflow_job` events from trusted repositories can create compute.
-- Each eligible workflow carries a run-scoped label so an untrusted queued run cannot take a runner created for a trusted run.
+- Serverless runners belong to a private organization runner group restricted to exact trusted workflow definitions; a run-scoped label adds routing defense in depth but is not a job binding.
 - Event delivery is at-least-once; every transition and provider operation must therefore be idempotent.
+- Provisioning claims have a shorter recovery deadline than the job TTL so a Worker crash cannot strand a queued job indefinitely.
+- Provider resources carry a monotonic attempt fence so interleaved stale calls cannot delete a newer winner.
 - A global or tenant concurrency lease is acquired before compute creation.
 - JIT configuration and bootstrap credentials are never durable state.
 - A completed event requests cleanup, while a provider-label TTL sweep independently guarantees eventual cleanup.
@@ -66,6 +68,7 @@ The first compute adapter uses the Hetzner Cloud API. It owns Hetzner request/re
 ```text
 workflow_job: queued
   -> verify signature, installation, repository, event, branch, static label, run-scoped label
+  -> verify the organization runner group's private, exact-workflow policy
   -> create or load idempotent job record
   -> acquire concurrency lease
   -> create labeled VM with a one-time bootstrap token
@@ -75,11 +78,13 @@ workflow_job: queued
 
 workflow_job: completed
   -> transition to cleaning
+  -> extend the capacity lease before awaiting external deletion
   -> delete runner record and compute resources
   -> release lease
   -> transition to completed
 
 Cron reconciliation
+  -> reclaim stale provisioning attempts
   -> attempt every expired job cleanup without global short-circuit
   -> list expired provider labels even after an individual cleanup failure
   -> remove orphaned runner and compute resources

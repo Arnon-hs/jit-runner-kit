@@ -117,8 +117,18 @@ export class Controller {
         try {
           await this.cleanup(job, "job-ttl-expired");
         } catch (error) {
+          if (error instanceof CapacityLeaseError) throw error;
           errors.push(error);
           this.emitCleanupFailure(job.key, "job-ttl", error);
+        }
+        continue;
+      }
+      if (job.state === "provisioning" && job.updatedAt + this.config.provisioningTimeoutSeconds <= now) {
+        try {
+          await this.retryStaleProvisioning(job);
+        } catch (error) {
+          errors.push(error);
+          this.emitCleanupFailure(job.key, "provisioning-recovery", error);
         }
       }
     }
@@ -146,6 +156,33 @@ export class Controller {
     }
   }
 
+  private async retryStaleProvisioning(record: JobRecord): Promise<void> {
+    const failed: JobRecord = {
+      ...record,
+      version: record.version + 1,
+      state: "failed",
+      failure: "stale provisioning attempt recovered",
+      updatedAt: this.ports.clock.now(),
+    };
+    if (!(await this.ports.jobs.compareAndSet(record.key, record.version, failed))) return;
+    try {
+      await this.handleQueued(record.event);
+    } catch (error) {
+      if (error instanceof RetryableError) {
+        const current = await this.ports.jobs.get(record.key);
+        if (current?.state === "failed") {
+          await this.ports.jobs.compareAndSet(current.key, current.version, {
+            ...current,
+            version: current.version + 1,
+            state: "provisioning",
+            updatedAt: this.ports.clock.now(),
+          });
+        }
+      }
+      throw error;
+    }
+  }
+
   private async handleQueued(event: TrustedWorkflowJobEvent): Promise<void> {
     const key = jobKey(event);
     let record = await this.ports.jobs.get(key);
@@ -153,11 +190,8 @@ export class Controller {
 
     const now = this.ports.clock.now();
     const expiresAt = now + this.config.ttlSeconds;
+    let leaseAcquired = false;
     if (!record || record.state === "failed") {
-      const leased = await this.ports.leases.acquire("global", key, this.config.maxRunners, expiresAt);
-      if (!leased) {
-        throw new RetryableError("controller concurrency limit reached", 30);
-      }
       const next: JobRecord = {
         key,
         version: record ? record.version + 1 : 0,
@@ -168,13 +202,16 @@ export class Controller {
         expiresAt,
       };
       if (!(await this.ports.jobs.compareAndSet(key, record?.version ?? null, next))) {
-        await this.ports.leases.release("global", key);
         return;
       }
       record = next;
     }
 
     try {
+      leaseAcquired = await this.ports.leases.acquire("global", key, this.config.maxRunners, expiresAt);
+      if (!leaseAcquired) {
+        throw new RetryableError("controller concurrency limit reached", 30);
+      }
       await this.ports.runners.assertRepositoryAccess(event);
       const minted = await this.ports.bootstrapTokens.mint();
       const resource = await this.ports.compute.create({
@@ -186,7 +223,9 @@ export class Controller {
         image: this.config.image,
         architecture: this.config.architecture,
         expiresAt: record.expiresAt,
+        provisioningAttempt: record.version,
         bootstrapToken: minted.token,
+        bootstrapTokenHash: minted.hash,
         bootstrapUrl: `${this.config.publicBaseUrl}/v1/bootstrap/${encodeURIComponent(key)}`,
       });
       const waiting: JobRecord = {
@@ -203,7 +242,7 @@ export class Controller {
       }
       this.ports.telemetry.emit("compute.created", { jobKey: key, serverId: resource.serverId });
     } catch (error) {
-      await this.failProvision(record, error);
+      await this.failProvision(record, error, leaseAcquired);
       throw error;
     }
   }
@@ -228,7 +267,7 @@ export class Controller {
     await this.cleanup(record, "workflow-job-completed");
   }
 
-  private async failProvision(record: JobRecord, error: unknown): Promise<void> {
+  private async failProvision(record: JobRecord, error: unknown, releaseLease: boolean): Promise<void> {
     const current = await this.ports.jobs.get(record.key);
     if (!current || current.version !== record.version || current.state !== "provisioning") return;
     if (!(await this.ports.jobs.compareAndSet(current.key, current.version, {
@@ -238,7 +277,7 @@ export class Controller {
       failure: errorMessage(error),
       updatedAt: this.ports.clock.now(),
     }))) return;
-    await this.ports.leases.release("global", record.key);
+    if (releaseLease) await this.ports.leases.release("global", record.key);
   }
 
   private async cleanup(record: JobRecord, reason: string): Promise<void> {
@@ -257,6 +296,17 @@ export class Controller {
     }
     const cleanupRecord = latest.state === "cleaning" ? latest : cleaning;
     const errors: unknown[] = [];
+    let computeDeleted = true;
+    try {
+      await this.ports.leases.retain(
+        "global",
+        cleanupRecord.key,
+        this.ports.clock.now() + this.config.ttlSeconds,
+      );
+    } catch (error) {
+      this.emitCleanupFailure(cleanupRecord.key, "lease-retain", error);
+      throw new CapacityLeaseError("cleanup could not retain its capacity lease", 30);
+    }
     if (cleanupRecord.runnerId) {
       try {
         await this.ports.runners.deleteRunner(cleanupRecord.event, cleanupRecord.runnerId);
@@ -269,15 +319,18 @@ export class Controller {
       try {
         await this.ports.compute.delete(cleanupRecord.compute);
       } catch (error) {
+        computeDeleted = false;
         errors.push(error);
         this.emitCleanupFailure(cleanupRecord.key, "compute", error);
       }
     }
-    try {
-      await this.ports.leases.release("global", cleanupRecord.key);
-    } catch (error) {
-      errors.push(error);
-      this.emitCleanupFailure(cleanupRecord.key, "lease", error);
+    if (computeDeleted) {
+      try {
+        await this.ports.leases.release("global", cleanupRecord.key);
+      } catch (error) {
+        errors.push(error);
+        this.emitCleanupFailure(cleanupRecord.key, "lease", error);
+      }
     }
     if (errors.length > 0) {
       throw new RetryableError(`cleanup completed with ${errors.length} error(s)`, 30);
@@ -369,3 +422,5 @@ export function trustWorkflowJobPayload(
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+class CapacityLeaseError extends RetryableError {}

@@ -76,7 +76,9 @@ export interface ComputeCreateRequest {
   image: string;
   architecture: "x64" | "arm64";
   expiresAt: number;
+  provisioningAttempt: number;
   bootstrapToken: string;
+  bootstrapTokenHash: string;
   bootstrapUrl: string;
 }
 
@@ -89,6 +91,7 @@ export interface JobStore {
 
 export interface LeaseStore {
   acquire(scope: string, holder: string, limit: number, expiresAt: number): Promise<boolean>;
+  retain(scope: string, holder: string, expiresAt: number): Promise<void>;
   release(scope: string, holder: string): Promise<void>;
 }
 
@@ -120,6 +123,7 @@ export interface Telemetry {
 export interface ControllerConfig {
   maxRunners: number;
   ttlSeconds: number;
+  provisioningTimeoutSeconds: number;
   serverType: string;
   location: string;
   image: string;

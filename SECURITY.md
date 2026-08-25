@@ -24,10 +24,11 @@ The maintainer aims to acknowledge a complete report within five business days. 
 ## Operator responsibilities
 
 - Scope the Hetzner token to a dedicated CI project.
-- Scope the GitHub token to only the repositories that need runners and grant only Actions read and repository Administration write.
-- In serverless mode, prefer a GitHub App installed only on served repositories. Store its private key, webhook secret, and the Hetzner token only as encrypted Worker secrets.
+- In control-job mode, scope the GitHub token to only the repositories that need runners and grant only the documented runner-administration permissions.
+- In serverless mode, require a GitHub App installed only on served private organization repositories and a dedicated organization runner group restricted to the exact trusted workflows. Store its private key, webhook secret, and the Hetzner token only as encrypted Worker secrets.
 - Keep `ALLOWED_REPOSITORIES` and `TRUSTED_BRANCHES` explicit. Pull-request workloads are rejected by the Cloudflare adapter, including same-repository pull requests.
-- Keep `RUN_LABEL_PREFIX` non-empty and include `jit-run-${{ github.run_id }}` in every Cloudflare-controlled job. A shared static runner label alone does not bind a GitHub JIT runner to one queued workflow run.
+- Keep `RUN_LABEL_PREFIX` non-empty and include `jit-run-${{ github.run_id }}` in every Cloudflare-controlled job, but treat labels only as routing defense in depth. They do not bind a GitHub JIT runner to a job ID.
+- Keep public-repository access disabled on the serverless runner group and make its selected workflow set exactly match `TRUSTED_WORKFLOWS`. The adapter fails closed if that policy drifts.
 - Expose the bootstrap endpoint only over HTTPS. It accepts one hashed, single-use token and verifies the VM's observed public IPv4 before issuing JIT configuration.
 - Never expose the provisioning path or privileged secrets to untrusted pull-request code.
 - Keep runner VMs outside production networks and accounts.

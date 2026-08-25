@@ -125,6 +125,22 @@ describe("provider-agnostic controller", () => {
     expect((await fixture.jobs.get("job-101"))?.state).toBe("awaiting-bootstrap");
   });
 
+  it("does not let a losing initial claim release the winning task lease", async () => {
+    const fixture = createFixture();
+    fixture.jobs.pauseInitialClaims(2);
+    fixture.compute.pauseNextCreate();
+    const attempts = [
+      fixture.controller.handleWorkflowJob(event),
+      fixture.controller.handleWorkflowJob({ ...event, deliveryId: "00000000-0000-4000-8000-000000000004" }),
+    ];
+    await fixture.compute.waitUntilCreateStarted();
+    await Promise.resolve();
+    expect(fixture.leases.active.size).toBe(1);
+    fixture.compute.resumeCreate();
+    await Promise.all(attempts);
+    expect(fixture.compute.created).toHaveLength(1);
+  });
+
   it("continues provider sweeping after one job cleanup fails", async () => {
     const fixture = createFixture();
     await fixture.controller.handleWorkflowJob(event);
@@ -140,6 +156,61 @@ describe("provider-agnostic controller", () => {
     });
     await expect(fixture.controller.reconcile()).rejects.toBeInstanceOf(RetryableError);
     expect(fixture.compute.deleted).toEqual(["server-101", "orphan"]);
+  });
+
+  it("retains capacity while compute deletion is still failing", async () => {
+    const fixture = createFixture();
+    await fixture.controller.handleWorkflowJob(event);
+    fixture.compute.failDelete = true;
+    fixture.clock.value = 2_000;
+    await expect(fixture.controller.reconcile()).rejects.toBeInstanceOf(RetryableError);
+    expect(fixture.leases.active.size).toBe(1);
+    fixture.compute.failDelete = false;
+    await fixture.controller.reconcile();
+    expect(fixture.leases.active.size).toBe(0);
+    expect((await fixture.jobs.get("job-101"))?.state).toBe("completed");
+  });
+
+  it("extends capacity before awaiting an expired VM deletion", async () => {
+    const fixture = createFixture(1);
+    await fixture.controller.handleWorkflowJob(event);
+    fixture.compute.pauseNextDelete();
+    fixture.clock.value = 2_000;
+    const cleanup = fixture.controller.reconcile();
+    await fixture.compute.waitUntilDeleteStarted();
+    await expect(
+      fixture.controller.handleWorkflowJob({ ...event, jobId: 102 }),
+    ).rejects.toBeInstanceOf(RetryableError);
+    fixture.compute.resumeDelete();
+    await cleanup;
+    expect(fixture.leases.active.size).toBe(0);
+  });
+
+  it("aborts cleanup before external I/O when capacity cannot be retained", async () => {
+    const fixture = createFixture();
+    await fixture.controller.handleWorkflowJob(event);
+    fixture.leases.failRetain = true;
+    fixture.clock.value = 2_000;
+    await expect(fixture.controller.reconcile()).rejects.toBeInstanceOf(RetryableError);
+    expect(fixture.compute.deleted).toHaveLength(0);
+  });
+
+  it("retries a provisioning record left stale by a controller crash", async () => {
+    const fixture = createFixture();
+    await fixture.jobs.compareAndSet("job-101", null, {
+      key: "job-101",
+      version: 0,
+      state: "provisioning",
+      event,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+      expiresAt: 1_300,
+    });
+    fixture.clock.value = 1_061;
+    await fixture.controller.reconcile();
+    expect((await fixture.jobs.get("job-101"))?.state).toBe("awaiting-bootstrap");
+    expect(fixture.compute.created).toHaveLength(1);
+    expect(fixture.leases.active.size).toBe(1);
   });
 
   it("prunes terminal records after the bounded retention window", async () => {
@@ -198,15 +269,16 @@ describe("provider-agnostic workflow_job trust policy", () => {
 
 function createFixture(maxRunners = 2) {
   const jobs = new MemoryJobStore();
-  const leases = new MemoryLeaseStore();
+  const clock = new MutableClock(1_000);
+  const leases = new MemoryLeaseStore(clock);
   const compute = new MemoryComputeProvider();
   const runners = new MemoryRunnerControl();
-  const clock = new MutableClock(1_000);
   const telemetry: Telemetry = { emit: () => undefined };
   const controller = new Controller(
     {
       maxRunners,
       ttlSeconds: 300,
+      provisioningTimeoutSeconds: 60,
       serverType: "cx33",
       location: "fsn1",
       image: "ubuntu-24.04",
@@ -228,8 +300,21 @@ function createFixture(maxRunners = 2) {
 
 class MemoryJobStore implements JobStore {
   private readonly records = new Map<string, JobRecord>();
+  private initialClaimTarget = 0;
+  private initialClaimArrivals = 0;
+  private initialClaimGate: Promise<void> | undefined;
+  private releaseInitialClaims: (() => void) | undefined;
+  pauseInitialClaims(target: number) {
+    this.initialClaimTarget = target;
+    this.initialClaimGate = new Promise((resolve) => { this.releaseInitialClaims = resolve; });
+  }
   async get(key: string) { return this.records.get(key) ?? null; }
   async compareAndSet(key: string, expectedVersion: number | null, value: JobRecord) {
+    if (expectedVersion === null && this.initialClaimGate) {
+      this.initialClaimArrivals += 1;
+      if (this.initialClaimArrivals >= this.initialClaimTarget) this.releaseInitialClaims?.();
+      await this.initialClaimGate;
+    }
     if ((this.records.get(key)?.version ?? null) !== expectedVersion) return false;
     this.records.set(key, structuredClone(value));
     return true;
@@ -251,10 +336,19 @@ class MemoryJobStore implements JobStore {
 
 class MemoryLeaseStore implements LeaseStore {
   readonly active = new Map<string, number>();
+  failRetain = false;
+  constructor(private readonly clock: Clock) {}
   async acquire(_scope: string, holder: string, limit: number, expiresAt: number) {
+    for (const [key, expiry] of this.active) {
+      if (expiry <= this.clock.now()) this.active.delete(key);
+    }
     if (!this.active.has(holder) && this.active.size >= limit) return false;
     this.active.set(holder, expiresAt);
     return true;
+  }
+  async retain(_scope: string, holder: string, expiresAt: number) {
+    if (this.failRetain) throw new Error("lease retain failed");
+    this.active.set(holder, expiresAt);
   }
   async release(_scope: string, holder: string) { this.active.delete(holder); }
 }
@@ -263,16 +357,27 @@ class MemoryComputeProvider implements ComputeProvider {
   readonly created: ComputeCreateRequest[] = [];
   readonly deleted: string[] = [];
   readonly expired: ComputeResource[] = [];
+  failDelete = false;
   private createStarted: (() => void) | undefined;
   private createStartedPromise: Promise<void> | undefined;
   private resume: (() => void) | undefined;
   private createGate: Promise<void> | undefined;
+  private deleteStarted: (() => void) | undefined;
+  private deleteStartedPromise: Promise<void> | undefined;
+  private resumeDeleteCallback: (() => void) | undefined;
+  private deleteGate: Promise<void> | undefined;
   pauseNextCreate() {
     this.createStartedPromise = new Promise((resolve) => { this.createStarted = resolve; });
     this.createGate = new Promise((resolve) => { this.resume = resolve; });
   }
   async waitUntilCreateStarted() { await this.createStartedPromise; }
   resumeCreate() { this.resume?.(); }
+  pauseNextDelete() {
+    this.deleteStartedPromise = new Promise((resolve) => { this.deleteStarted = resolve; });
+    this.deleteGate = new Promise((resolve) => { this.resumeDeleteCallback = resolve; });
+  }
+  async waitUntilDeleteStarted() { await this.deleteStartedPromise; }
+  resumeDelete() { this.resumeDeleteCallback?.(); }
   async create(request: ComputeCreateRequest) {
     this.created.push(request);
     this.createStarted?.();
@@ -287,7 +392,12 @@ class MemoryComputeProvider implements ComputeProvider {
       jobKey: request.jobKey,
     };
   }
-  async delete(resource: ComputeResource) { this.deleted.push(resource.serverId); }
+  async delete(resource: ComputeResource) {
+    this.deleteStarted?.();
+    if (this.deleteGate) await this.deleteGate;
+    if (this.failDelete) throw new Error("compute delete failed");
+    this.deleted.push(resource.serverId);
+  }
   async listExpired() { return this.expired.splice(0); }
 }
 
