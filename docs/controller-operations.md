@@ -82,6 +82,7 @@ For every successful and failed canary, verify:
 - the job state reached `completed` or an explicit terminal failure;
 - no matching Hetzner VM, Primary IPv4, firewall, or SSH key remains;
 - the TTL sweeper is able to find and remove deliberately stale test resources;
+- `jit-runner inventory --require-empty` reports zero managed resources after cleanup;
 - deployment verification checks the exact release commit rather than only an HTTP 200 response.
 
 The selected control-plane adapter is the source of provisioning decisions, GitHub is the source of queued-job state, and the cloud provider is the source of resource existence. Healthy operation requires all three views to agree. See [Serverless controller architecture](serverless-controller-architecture.md) for the accepted provider-agnostic event-driven design.

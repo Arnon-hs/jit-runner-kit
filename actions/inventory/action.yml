@@ -1,0 +1,24 @@
+name: Inventory managed JIT runner resources
+description: Count Hetzner resources carrying the jit-runner-kit ownership label.
+
+inputs:
+  hcloud-token:
+    description: Hetzner Cloud project token.
+    required: true
+  require-empty:
+    description: Fail when any managed resources remain.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        HCLOUD_TOKEN: ${{ inputs.hcloud-token }}
+        INPUT_REQUIRE_EMPTY: ${{ inputs.require-empty }}
+      run: |
+        args=(inventory)
+        if [[ "$INPUT_REQUIRE_EMPTY" == true ]]; then
+          args+=(--require-empty)
+        fi
+        "${GITHUB_ACTION_PATH}/../../bin/jit-runner" "${args[@]}"

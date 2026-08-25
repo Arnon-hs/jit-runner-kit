@@ -136,6 +136,7 @@ bin/jit-runner destroy \
 
 bin/jit-runner sweep --dry-run
 bin/jit-runner sweep
+bin/jit-runner inventory --require-empty
 ```
 
 `provision` prints machine-readable `key=value` outputs and also writes them to `$GITHUB_OUTPUT` when available. Set `JIT_RUNNER_IAC_CMD=terraform` to override the default OpenTofu-first auto-detection.

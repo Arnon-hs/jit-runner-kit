@@ -19,6 +19,7 @@ Usage:
   jit-runner provision --repository OWNER/REPO [options]
   jit-runner destroy --state-dir PATH [--run-key KEY] [--repository OWNER/REPO --runner-id ID]
   jit-runner sweep [--dry-run]
+  jit-runner inventory [--require-empty]
 
 Provision options:
   --repository OWNER/REPO       Target GitHub repository (required)
@@ -597,6 +598,30 @@ cmd_sweep() {
   done
 }
 
+cmd_inventory() {
+  local require_empty=false
+  local resource response count total=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --require-empty) require_empty=true; shift ;;
+      *) die "unknown inventory option: $1" ;;
+    esac
+  done
+  for command in curl jq; do require_command "$command"; done
+  require_secret HCLOUD_TOKEN
+  for resource in servers firewalls primary_ips ssh_keys; do
+    response="$(hcloud_request GET "$resource" --get --data-urlencode "label_selector=managed_by=${MANAGED_BY}")"
+    count="$(jq -r --arg resource "$resource" '.[$resource] | length' <<<"$response")"
+    printf '%s=%s\n' "$resource" "$count"
+    total=$((total + count))
+  done
+  printf 'total=%s\n' "$total"
+  if [[ "$require_empty" == true && "$total" != 0 ]]; then
+    printf 'error: managed Hetzner resources remain\n' >&2
+    return 1
+  fi
+}
+
 main() {
   local command="${1:-}"
   [[ -n "$command" ]] || { usage; exit 1; }
@@ -605,6 +630,7 @@ main() {
     provision) cmd_provision "$@" ;;
     destroy) cmd_destroy "$@" ;;
     sweep) cmd_sweep "$@" ;;
+    inventory) cmd_inventory "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: ${command}" ;;
   esac

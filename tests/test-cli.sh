@@ -11,6 +11,7 @@ help_output="$($CLI --help)"
 [[ "$help_output" == *"jit-runner provision"* ]]
 [[ "$help_output" == *"jit-runner destroy"* ]]
 [[ "$help_output" == *"jit-runner sweep"* ]]
+[[ "$help_output" == *"jit-runner inventory"* ]]
 
 controller_help="$($CONTROLLER --help)"
 [[ "$controller_help" == *"jit-runner-controller --config"* ]]
@@ -105,6 +106,15 @@ sweep_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "
 [[ "$sweep_output" == "would-delete servers/101" ]]
 [[ "$sweep_output" != *"102"* ]]
 [[ "$sweep_output" != *"103"* ]]
+
+inventory_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" inventory)"
+[[ "$inventory_output" == *$'servers=3\n'* ]]
+[[ "$inventory_output" == *$'total=3'* ]]
+set +e
+PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" inventory --require-empty >/dev/null 2>&1
+inventory_status=$?
+set -e
+[[ $inventory_status -ne 0 ]]
 
 mkdir -p "$TEST_TMP/destroy-state"
 PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test JIT_RUNNER_GITHUB_TOKEN=test \
