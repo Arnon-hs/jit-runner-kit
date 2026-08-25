@@ -1,6 +1,6 @@
 # Deploy the Cloudflare controller
 
-Status: controlled canary. The Worker compiles and the provider-agnostic lifecycle, trust, cryptography, and Hetzner adapter have local conformance coverage. Complete the live-cloud gates below before using it for production releases.
+Status: v0.2.0 controlled-canary package. The Worker compiles and the provider-agnostic lifecycle, trust, cryptography, configuration, and Hetzner adapter have local conformance coverage. Complete the live-cloud gates below before using it for production releases.
 
 ## What this adapter owns
 
@@ -40,11 +40,41 @@ Create the GitHub App with:
 - Webhook URL: `https://YOUR_CONTROLLER/webhooks/github`.
 - A random webhook secret.
 
+The repository includes `examples/github-app-manifest.json` as a reviewable configuration template. It is not submitted anywhere by the project and it does not implement GitHub's one-hour manifest-conversion handshake. Register the private App in your organization settings (or through a one-time manifest flow that you control), then store the generated ID and private key only as Worker secrets. See GitHub's [App manifest parameters](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) and [self-hosted runner permission requirements](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps).
+
 Do not enable the controller for public-fork or pull-request jobs. This implementation rejects every queued job with a non-empty `pull_requests` array.
 
 Create a dedicated organization runner group with public-repository access disabled, workflow access enabled, and only explicitly trusted workflow paths selected. Pin every selected path to `refs/heads/main` (or another protected branch) or a full commit SHA. The controller verifies that the live group policy exactly matches `TRUSTED_WORKFLOWS` before it creates compute. Personal-account repositories are intentionally unsupported in this secure serverless mode; use the GitHub control-job adapter for them.
 
 ## Configure Cloudflare
+
+### Prepare everything offline
+
+The repository ships inert deployment templates. Copy them to ignored canary files before inserting real organization names or URLs:
+
+```bash
+cp packages/adapter-controller-cloudflare/wrangler.jsonc \
+  packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+cp examples/github-app-manifest.json examples/github-app-manifest.canary.json
+```
+
+Edit both copies, then run the offline fail-closed preflight:
+
+```bash
+npm run preflight:cloudflare -- \
+  --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc \
+  --manifest examples/github-app-manifest.canary.json
+
+npx wrangler deploy --dry-run \
+  --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc \
+  --outdir .wrangler-dist-canary
+```
+
+The preflight verifies the SQLite Durable Object export, Queue/DLQ/Cron bindings, organization and repository relationship, exact branch- or SHA-pinned workflow paths, numeric limits, HTTPS origin, and minimum GitHub App permissions. It makes no provider calls and reads no secrets. The committed template itself is checked in CI with `npm run check:cloudflare-config`.
+
+The Wrangler template uses Cloudflare's [declarative `exports` lifecycle](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/) for the new SQLite Durable Object namespace. Do not add the legacy `migrations` array to a new deployment.
+
+### Create resources only when the canary is approved
 
 Install exact development dependencies and create the queues once:
 
@@ -54,7 +84,7 @@ npx wrangler queues create jit-runner-kit-tasks
 npx wrangler queues create jit-runner-kit-tasks-dlq
 ```
 
-Edit `packages/adapter-controller-cloudflare/wrangler.jsonc`:
+Edit the ignored `packages/adapter-controller-cloudflare/wrangler.canary.jsonc`:
 
 - set `ALLOWED_REPOSITORIES` to a comma-separated `owner/repository` allowlist;
 - set `TRUSTED_BRANCHES` to explicit branch names;
@@ -69,10 +99,10 @@ Edit `packages/adapter-controller-cloudflare/wrangler.jsonc`:
 Store credentials only as encrypted Worker secrets:
 
 ```bash
-npx wrangler secret put GITHUB_WEBHOOK_SECRET --config packages/adapter-controller-cloudflare/wrangler.jsonc
-npx wrangler secret put GITHUB_APP_ID --config packages/adapter-controller-cloudflare/wrangler.jsonc
-npx wrangler secret put GITHUB_APP_PRIVATE_KEY --config packages/adapter-controller-cloudflare/wrangler.jsonc
-npx wrangler secret put HCLOUD_TOKEN --config packages/adapter-controller-cloudflare/wrangler.jsonc
+npx wrangler secret put GITHUB_WEBHOOK_SECRET --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+npx wrangler secret put GITHUB_APP_ID --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+npx wrangler secret put GITHUB_APP_PRIVATE_KEY --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+npx wrangler secret put HCLOUD_TOKEN --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
 ```
 
 The GitHub App private key may use GitHub's PKCS#1 PEM or PKCS#8 PEM format. Never put it in `vars`, `.dev.vars`, shell history, source control, logs, Durable Object storage, or Queue messages.
@@ -81,7 +111,7 @@ Build locally, then deploy:
 
 ```bash
 npm run check:serverless
-npx wrangler deploy --config packages/adapter-controller-cloudflare/wrangler.jsonc
+npx wrangler deploy --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
 curl --fail https://YOUR_CONTROLLER/healthz
 ```
 

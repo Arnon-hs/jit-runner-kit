@@ -47,7 +47,7 @@ export default {
     try {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/healthz") {
-        return json({ status: "ok", adapter: "cloudflare", version: "0.2.0-dev" });
+        return json({ status: "ok", adapter: "cloudflare", version: "0.2.0" });
       }
       if (request.method === "POST" && url.pathname === "/webhooks/github") {
         return await handleGithubWebhook(request, env);

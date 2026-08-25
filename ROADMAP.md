@@ -19,6 +19,7 @@ This roadmap describes direction, not delivery promises.
 - [x] Add secure organization-level JIT runners with exact workflow-restricted runner-group verification.
 - [x] Use one-time bootstrap tokens so serverless mode needs no SSH or local OpenTofu state.
 - [x] Add structured controller events and health output.
+- [x] Publish offline-validated Wrangler, GitHub App, Queue/DLQ, Durable Object, Cron, and configuration preflight templates.
 - [ ] Complete live-cloud conformance canaries for queue retry/DLQ, Durable Object recovery, GitHub App bootstrap, success, failure, cancellation, and TTL cleanup. Local core, crypto, compute, and bundle conformance tests are present.
 
 ## Later, if demand is demonstrated

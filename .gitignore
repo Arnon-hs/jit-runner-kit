@@ -13,6 +13,8 @@
 node_modules/
 .wrangler/
 .wrangler-dist/
+packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+examples/github-app-manifest.canary.json
 runner_ed25519
 runner_ed25519.pub
 .DS_Store

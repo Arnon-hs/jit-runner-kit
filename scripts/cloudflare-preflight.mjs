@@ -1,0 +1,195 @@
+#!/usr/bin/env node
+
+import { readFile } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname, resolve } from "node:path";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const defaultConfig = resolve(root, "packages/adapter-controller-cloudflare/wrangler.jsonc");
+const defaultManifest = resolve(root, "examples/github-app-manifest.json");
+
+export function validateCloudflareConfig(config, { template = false } = {}) {
+  const issues = [];
+  const vars = config?.vars ?? {};
+  const requiredVars = [
+    "ALLOWED_REPOSITORIES",
+    "TRUSTED_BRANCHES",
+    "TRIGGER_LABEL",
+    "RUN_LABEL_PREFIX",
+    "GITHUB_ORGANIZATION",
+    "RUNNER_GROUP_ID",
+    "TRUSTED_WORKFLOWS",
+    "MAX_RUNNERS",
+    "TTL_SECONDS",
+    "PROVISIONING_TIMEOUT_SECONDS",
+    "SERVER_TYPE",
+    "SERVER_LOCATION",
+    "SERVER_IMAGE",
+    "RUNNER_ARCHITECTURE",
+    "PUBLIC_BASE_URL",
+  ];
+  for (const name of requiredVars) {
+    if (!String(vars[name] ?? "").trim()) issues.push(`vars.${name} is required`);
+  }
+
+  if (config?.migrations) issues.push("use declarative exports instead of legacy Durable Object migrations");
+  const durableExport = config?.exports?.ControllerDurableObject;
+  if (durableExport?.type !== "durable-object" || durableExport?.storage !== "sqlite") {
+    issues.push("exports.ControllerDurableObject must be a SQLite durable-object");
+  }
+  const binding = config?.durable_objects?.bindings?.find((item) => item.name === "CONTROLLER");
+  if (binding?.class_name !== "ControllerDurableObject") {
+    issues.push("CONTROLLER must bind ControllerDurableObject");
+  }
+
+  const producer = config?.queues?.producers?.find((item) => item.binding === "TASK_QUEUE");
+  const consumer = config?.queues?.consumers?.find((item) => item.queue === producer?.queue);
+  if (!producer?.queue || !consumer) issues.push("TASK_QUEUE must have a matching queue consumer");
+  if (!consumer?.dead_letter_queue) issues.push("the task queue consumer must define a dead-letter queue");
+  if (!Array.isArray(config?.triggers?.crons) || config.triggers.crons.length === 0) {
+    issues.push("at least one independent cleanup Cron trigger is required");
+  }
+
+  const organization = String(vars.GITHUB_ORGANIZATION ?? "").trim().toLowerCase();
+  const repositories = csv(vars.ALLOWED_REPOSITORIES).map((value) => value.toLowerCase());
+  if (repositories.length === 0) issues.push("ALLOWED_REPOSITORIES must not be empty");
+  for (const repository of repositories) {
+    if (!repository.startsWith(`${organization}/`) || repository.split("/").length !== 2) {
+      issues.push(`allowed repository must belong to GITHUB_ORGANIZATION: ${repository}`);
+    }
+  }
+
+  const workflows = csv(vars.TRUSTED_WORKFLOWS);
+  if (workflows.length === 0) issues.push("TRUSTED_WORKFLOWS must not be empty");
+  for (const workflow of workflows) {
+    const match = workflow.match(/^([^/]+\/[^/]+)\/\.github\/workflows\/[^@/]+\.ya?ml@(?:refs\/heads\/[A-Za-z0-9._/-]+|[0-9a-f]{40})$/i);
+    if (!match) {
+      issues.push(`trusted workflow must use a full branch- or SHA-pinned path: ${workflow}`);
+      continue;
+    }
+    if (!repositories.includes(match[1].toLowerCase())) {
+      issues.push(`trusted workflow repository is not allowlisted: ${match[1]}`);
+    }
+  }
+
+  const maxRunners = integer(vars.MAX_RUNNERS);
+  const ttl = integer(vars.TTL_SECONDS);
+  const provisioningTimeout = integer(vars.PROVISIONING_TIMEOUT_SECONDS);
+  const runnerGroupId = integer(vars.RUNNER_GROUP_ID);
+  if (maxRunners < 1 || maxRunners > 20) issues.push("MAX_RUNNERS must be between 1 and 20");
+  if (ttl < 600 || ttl > 86_400) issues.push("TTL_SECONDS must be between 600 and 86400");
+  if (provisioningTimeout < 30 || provisioningTimeout >= ttl) {
+    issues.push("PROVISIONING_TIMEOUT_SECONDS must be at least 30 and lower than TTL_SECONDS");
+  }
+  if (runnerGroupId < 1) issues.push("RUNNER_GROUP_ID must be a positive integer");
+  if (!["x64", "arm64"].includes(vars.RUNNER_ARCHITECTURE)) {
+    issues.push("RUNNER_ARCHITECTURE must be x64 or arm64");
+  }
+
+  try {
+    const publicUrl = new URL(vars.PUBLIC_BASE_URL);
+    if (publicUrl.protocol !== "https:") issues.push("PUBLIC_BASE_URL must use HTTPS");
+  } catch {
+    issues.push("PUBLIC_BASE_URL must be an absolute URL");
+  }
+
+  if (!template) {
+    for (const [name, value] of Object.entries({
+      GITHUB_ORGANIZATION: vars.GITHUB_ORGANIZATION,
+      ALLOWED_REPOSITORIES: vars.ALLOWED_REPOSITORIES,
+      TRUSTED_WORKFLOWS: vars.TRUSTED_WORKFLOWS,
+      PUBLIC_BASE_URL: vars.PUBLIC_BASE_URL,
+    })) {
+      if (/your-|owner\/|\.example(?:\.|\/|$)/i.test(String(value ?? ""))) {
+        issues.push(`${name} still contains a template placeholder`);
+      }
+    }
+  }
+  return unique(issues);
+}
+
+export function validateGithubAppManifest(manifest, { template = false } = {}) {
+  const issues = [];
+  if (manifest?.default_permissions?.actions !== "read") issues.push("GitHub App Actions permission must be read");
+  if (manifest?.default_permissions?.metadata !== "read") issues.push("GitHub App Metadata permission must be read");
+  if (manifest?.default_permissions?.organization_self_hosted_runners !== "write") {
+    issues.push("GitHub App organization self-hosted runners permission must be write");
+  }
+  if (!manifest?.default_events?.includes("workflow_job")) issues.push("GitHub App must subscribe to workflow_job");
+  if (manifest?.public !== false) issues.push("GitHub App template must default to a private app");
+  const webhookUrl = String(manifest?.hook_attributes?.url ?? "");
+  if (!/^https:\/\/.+\/webhooks\/github$/.test(webhookUrl)) issues.push("GitHub App webhook URL must use HTTPS and /webhooks/github");
+  if (!template && /\.example(?:\.|\/|$)/i.test(webhookUrl)) issues.push("GitHub App webhook URL still contains a template placeholder");
+  return unique(issues);
+}
+
+export async function readJsonc(path) {
+  return JSON.parse(stripJsonComments(await readFile(path, "utf8")));
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const template = args.includes("--template");
+  const configArgument = args.indexOf("--config");
+  const manifestArgument = args.indexOf("--manifest");
+  const configPath = configArgument >= 0 ? resolve(args[configArgument + 1] ?? "") : defaultConfig;
+  const manifestPath = manifestArgument >= 0 ? resolve(args[manifestArgument + 1] ?? "") : defaultManifest;
+  const [config, manifest] = await Promise.all([readJsonc(configPath), readJsonc(manifestPath)]);
+  const issues = [
+    ...validateCloudflareConfig(config, { template }),
+    ...validateGithubAppManifest(manifest, { template }),
+  ];
+  if (issues.length > 0) {
+    console.error("Cloudflare deployment preflight failed:");
+    for (const issue of issues) console.error(`- ${issue}`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(template
+    ? "Cloudflare deployment templates are internally consistent; no external resources were contacted."
+    : "Cloudflare deployment configuration is ready for authenticated canary setup; no external resources were contacted.");
+}
+
+function stripJsonComments(value) {
+  let result = "";
+  let inString = false;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value[index];
+    const next = value[index + 1];
+    if (lineComment) {
+      if (current === "\n") { lineComment = false; result += current; }
+      continue;
+    }
+    if (blockComment) {
+      if (current === "*" && next === "/") { blockComment = false; index += 1; }
+      continue;
+    }
+    if (!inString && current === "/" && next === "/") { lineComment = true; index += 1; continue; }
+    if (!inString && current === "/" && next === "*") { blockComment = true; index += 1; continue; }
+    result += current;
+    if (inString && current === "\\" && !escaped) { escaped = true; continue; }
+    if (current === '"' && !escaped) inString = !inString;
+    escaped = false;
+  }
+  return result;
+}
+
+function csv(value) {
+  return String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function integer(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : -1;
+}
+
+function unique(values) {
+  return [...new Set(values)];
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  await main();
+}

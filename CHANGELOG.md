@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-25
+
 ### Added
 
 - A provider-agnostic TypeScript controller core with explicit job, lease, compute, runner, bootstrap, clock, and telemetry ports.
@@ -11,6 +13,11 @@ All notable changes to this project are documented in this file. The format is b
 - A direct Hetzner Cloud API compute adapter that creates deny-inbound, SSH-free VMs and labels servers, Primary IPv4s, and firewalls for independent TTL cleanup.
 - A one-time bootstrap exchange that stores only the token digest, binds issuance to the VM public IPv4, and never persists JIT configuration.
 - Local conformance tests and a Wrangler dry-run build gate for the serverless packages.
+- An offline fail-closed Cloudflare deployment preflight and a least-privilege GitHub App manifest template.
+
+### Changed
+
+- New Cloudflare deployments use declarative SQLite Durable Object `exports` instead of the legacy migrations array.
 
 ### Security
 
@@ -42,5 +49,6 @@ All notable changes to this project are documented in this file. The format is b
 - Per-run ownership labels, rollback-safe provisioning, runner-record deletion, and two-path cleanup limit orphaned resources.
 - Official GitHub runner archives are verified against their published SHA-256 digest.
 
-[Unreleased]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Arnon-hs/jit-runner-kit/releases/tag/v0.1.0
