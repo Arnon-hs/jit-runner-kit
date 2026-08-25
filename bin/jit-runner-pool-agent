@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+usage() {
+  cat <<'EOF'
+Usage: jit-runner-pool-agent [--once]
+
+Poll a Cloudflare controller for trusted JIT jobs and run each job in a fresh
+runner container with its own Docker-in-Docker sidecar and network.
+
+Required environment:
+  JIT_POOL_CONTROLLER_URL  HTTPS Worker base URL
+  JIT_POOL_HOST_TOKEN      43-character base64url host credential, or
+  JIT_POOL_ENROLLMENT_TOKEN one-time 43-character base64url enrollment credential
+
+Optional environment:
+  JIT_POOL_MAX_RUNNERS     Concurrent runner slots (default: 2, maximum: 4)
+  JIT_POOL_RUNNER_IMAGE    Local runner image (default: jit-runner-kit/runner:local)
+  JIT_POOL_DIND_IMAGE      Immutable DinD image reference
+  JIT_POOL_POLL_SECONDS    Idle polling interval (default: 3)
+  JIT_POOL_IDLE_SECONDS    Delete an empty elastic host after this delay (default: 600)
+  JIT_POOL_STATE_ROOT      Root-only runtime state (default: /var/lib/jit-runner-kit)
+  JIT_POOL_RUNNER_CPUS     CPU limit per runner container (default: 2)
+  JIT_POOL_RUNNER_MEMORY   Memory limit per runner container (default: 2500m)
+  JIT_POOL_DIND_MEMORY     Memory limit per DinD sidecar (default: 1500m)
+EOF
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+required() {
+  local name="$1"
+  [[ -n "${!name:-}" ]] || die "$name is required"
+}
+
+is_positive_integer() {
+  [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
+active_count() {
+  jobs -rp | wc -l | tr -d ' '
+}
+
+enroll_host() {
+  local response_file http_status host_token token_file
+  token_file="${JIT_POOL_STATE_ROOT}/host-token"
+  if [[ -r "$token_file" ]]; then
+    JIT_POOL_HOST_TOKEN="$(<"$token_file")"
+    export JIT_POOL_HOST_TOKEN
+    return 0
+  fi
+  [[ "${JIT_POOL_ENROLLMENT_TOKEN:-}" =~ ^[A-Za-z0-9_-]{43}$ ]] || \
+    die "JIT_POOL_HOST_TOKEN or JIT_POOL_ENROLLMENT_TOKEN is required"
+  response_file="$(mktemp "${JIT_POOL_STATE_ROOT}/enroll.XXXXXX")"
+  http_status="$(curl --silent --show-error \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
+    --request POST \
+    --header "Authorization: Bearer ${JIT_POOL_ENROLLMENT_TOKEN}" \
+    "${JIT_POOL_CONTROLLER_URL%/}/v1/pool/enroll")" || {
+      rm -f "$response_file"
+      return 75
+    }
+  if [[ "$http_status" != 200 ]]; then
+    printf 'pool enrollment rejected with HTTP %s\n' "$http_status" >&2
+    rm -f "$response_file"
+    return 75
+  fi
+  host_token="$(jq -er '.host_token | select(test("^[A-Za-z0-9_-]{43}$"))' "$response_file")" || {
+    rm -f "$response_file"
+    return 75
+  }
+  rm -f "$response_file"
+  printf '%s' "$host_token" >"${token_file}.tmp"
+  chmod 600 "${token_file}.tmp"
+  mv "${token_file}.tmp" "$token_file"
+  JIT_POOL_HOST_TOKEN="$host_token"
+  unset JIT_POOL_ENROLLMENT_TOKEN
+  export JIT_POOL_HOST_TOKEN
+}
+
+cleanup_all() {
+  local ids
+  ids="$(docker ps --all --quiet --filter label=jit-runner-kit=pool 2>/dev/null || true)"
+  if [[ -n "$ids" ]]; then
+    # shellcheck disable=SC2086
+    docker rm --force $ids >/dev/null 2>&1 || true
+  fi
+  while IFS= read -r network; do
+    [[ -n "$network" ]] || continue
+    docker network rm "$network" >/dev/null 2>&1 || true
+  done < <(docker network ls --quiet --filter label=jit-runner-kit=pool 2>/dev/null)
+  find "${JIT_POOL_STATE_ROOT}/jobs" -mindepth 1 -maxdepth 1 -type d -exec rm -rf -- {} + 2>/dev/null || true
+}
+
+cleanup_job() {
+  local runner_name="$1"
+  local dind_name="$2"
+  local network_name="$3"
+  local job_dir="$4"
+  docker rm --force "$runner_name" >/dev/null 2>&1 || true
+  docker rm --force "$dind_name" >/dev/null 2>&1 || true
+  docker network rm "$network_name" >/dev/null 2>&1 || true
+  rm -f "${job_dir}/jit-config"
+  rmdir "$job_dir" >/dev/null 2>&1 || true
+}
+
+run_claim() {
+  local job_key="$1"
+  local encoded_jit_config="$2"
+  local expires_at="$3"
+  local suffix="${job_key#job-}"
+  local runner_name="jrk-runner-${suffix}"
+  local dind_name="jrk-dind-${suffix}"
+  local network_name="jrk-${suffix}"
+  local job_dir="${JIT_POOL_STATE_ROOT}/jobs/${job_key}"
+  local remaining attempt
+
+  mkdir -p "$job_dir"
+  chmod 700 "$job_dir"
+  printf '%s' "$encoded_jit_config" >"${job_dir}/jit-config"
+  chmod 600 "${job_dir}/jit-config"
+  trap 'cleanup_job "$runner_name" "$dind_name" "$network_name" "$job_dir"' RETURN
+
+  docker network create --label jit-runner-kit=pool "$network_name" >/dev/null
+  docker run --detach --privileged \
+    --name "$dind_name" \
+    --network "$network_name" \
+    --network-alias docker \
+    --memory "$JIT_POOL_DIND_MEMORY" \
+    --label jit-runner-kit=pool \
+    --label "jit-runner-kit.job=${job_key}" \
+    "$JIT_POOL_DIND_IMAGE" --tls=false >/dev/null
+
+  for attempt in {1..30}; do
+    if docker exec "$dind_name" docker info >/dev/null 2>&1; then
+      break
+    fi
+    if [[ "$attempt" == 30 ]]; then
+      printf 'job=%s phase=dind-ready result=failed\n' "$job_key" >&2
+      return 1
+    fi
+    sleep 1
+  done
+
+  remaining=$((expires_at - $(date +%s)))
+  if (( remaining <= 0 )); then
+    printf 'job=%s phase=runner result=expired\n' "$job_key" >&2
+    return 1
+  fi
+
+  printf 'job=%s phase=runner result=started\n' "$job_key"
+  timeout --signal=TERM --kill-after=30s "${remaining}s" \
+    docker run --rm \
+      --name "$runner_name" \
+      --network "$network_name" \
+      --cpus "$JIT_POOL_RUNNER_CPUS" \
+      --memory "$JIT_POOL_RUNNER_MEMORY" \
+      --env DOCKER_HOST=tcp://docker:2375 \
+      --label jit-runner-kit=pool \
+      --label "jit-runner-kit.job=${job_key}" \
+      --mount "type=bind,src=${job_dir}/jit-config,dst=/run/jit-config,readonly" \
+      "$JIT_POOL_RUNNER_IMAGE"
+  printf 'job=%s phase=runner result=finished\n' "$job_key"
+}
+
+claim_once() {
+  local response_file http_status job_key encoded_jit_config expires_at
+  response_file="$(mktemp "${JIT_POOL_STATE_ROOT}/claim.XXXXXX")"
+  http_status="$(curl --silent --show-error \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
+    --request POST \
+    --header "Authorization: Bearer ${JIT_POOL_HOST_TOKEN}" \
+    "${JIT_POOL_CONTROLLER_URL%/}/v1/pool/claim")" || {
+      rm -f "$response_file"
+      return 75
+    }
+
+  if [[ "$http_status" == 204 ]]; then
+    rm -f "$response_file"
+    return 10
+  fi
+  if [[ "$http_status" != 200 ]]; then
+    printf 'pool claim rejected with HTTP %s\n' "$http_status" >&2
+    rm -f "$response_file"
+    return 75
+  fi
+
+  job_key="$(jq -er '.job_key | select(test("^job-[0-9]+$"))' "$response_file")" || {
+    rm -f "$response_file"
+    return 75
+  }
+  encoded_jit_config="$(jq -er '.encoded_jit_config | select(type == "string" and length > 0)' "$response_file")" || {
+    rm -f "$response_file"
+    return 75
+  }
+  expires_at="$(jq -er '.expires_at | select(type == "number" and floor == .)' "$response_file")" || {
+    rm -f "$response_file"
+    return 75
+  }
+  rm -f "$response_file"
+
+  run_claim "$job_key" "$encoded_jit_config" "$expires_at" &
+  return 0
+}
+
+release_idle_host() {
+  local response_file http_status
+  response_file="$(mktemp "${JIT_POOL_STATE_ROOT}/release.XXXXXX")"
+  http_status="$(curl --silent --show-error \
+    --connect-timeout 10 \
+    --max-time 30 \
+    --output "$response_file" \
+    --write-out '%{http_code}' \
+    --request POST \
+    --header "Authorization: Bearer ${JIT_POOL_HOST_TOKEN}" \
+    "${JIT_POOL_CONTROLLER_URL%/}/v1/pool/release")" || {
+      rm -f "$response_file"
+      return 75
+    }
+  rm -f "$response_file"
+  if [[ "$http_status" == 202 ]]; then
+    printf 'pool phase=idle-release result=accepted\n'
+    return 0
+  fi
+  if [[ "$http_status" == 409 ]]; then
+    return 10
+  fi
+  printf 'pool idle release rejected with HTTP %s\n' "$http_status" >&2
+  return 75
+}
+
+main() {
+  local once=false result count idle_since=0 now
+  if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+    usage
+    return 0
+  fi
+  if [[ "${1:-}" == --once ]]; then
+    once=true
+    shift
+  fi
+  [[ $# -eq 0 ]] || die "unexpected argument: $1"
+  required JIT_POOL_CONTROLLER_URL
+  [[ "$JIT_POOL_CONTROLLER_URL" == https://* ]] || die "JIT_POOL_CONTROLLER_URL must use HTTPS"
+
+  JIT_POOL_MAX_RUNNERS="${JIT_POOL_MAX_RUNNERS:-2}"
+  JIT_POOL_RUNNER_IMAGE="${JIT_POOL_RUNNER_IMAGE:-jit-runner-kit/runner:local}"
+  JIT_POOL_DIND_IMAGE="${JIT_POOL_DIND_IMAGE:-docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce}"
+  JIT_POOL_POLL_SECONDS="${JIT_POOL_POLL_SECONDS:-3}"
+  JIT_POOL_IDLE_SECONDS="${JIT_POOL_IDLE_SECONDS:-600}"
+  JIT_POOL_STATE_ROOT="${JIT_POOL_STATE_ROOT:-/var/lib/jit-runner-kit}"
+  JIT_POOL_RUNNER_CPUS="${JIT_POOL_RUNNER_CPUS:-2}"
+  JIT_POOL_RUNNER_MEMORY="${JIT_POOL_RUNNER_MEMORY:-2500m}"
+  JIT_POOL_DIND_MEMORY="${JIT_POOL_DIND_MEMORY:-1500m}"
+  export JIT_POOL_STATE_ROOT JIT_POOL_RUNNER_IMAGE JIT_POOL_DIND_IMAGE JIT_POOL_RUNNER_CPUS
+  export JIT_POOL_RUNNER_MEMORY JIT_POOL_DIND_MEMORY
+
+  is_positive_integer "$JIT_POOL_MAX_RUNNERS" || die "JIT_POOL_MAX_RUNNERS must be a positive integer"
+  ((JIT_POOL_MAX_RUNNERS <= 4)) || die "JIT_POOL_MAX_RUNNERS must not exceed 4"
+  is_positive_integer "$JIT_POOL_POLL_SECONDS" || die "JIT_POOL_POLL_SECONDS must be a positive integer"
+  is_positive_integer "$JIT_POOL_IDLE_SECONDS" || die "JIT_POOL_IDLE_SECONDS must be a positive integer"
+  ((JIT_POOL_IDLE_SECONDS >= 300 && JIT_POOL_IDLE_SECONDS <= 3600)) || \
+    die "JIT_POOL_IDLE_SECONDS must be between 300 and 3600"
+  command -v curl >/dev/null || die "curl is required"
+  command -v docker >/dev/null || die "docker is required"
+  command -v jq >/dev/null || die "jq is required"
+  command -v timeout >/dev/null || die "timeout is required"
+  mkdir -p "${JIT_POOL_STATE_ROOT}/jobs"
+  chmod 700 "$JIT_POOL_STATE_ROOT" "${JIT_POOL_STATE_ROOT}/jobs"
+  if [[ -z "${JIT_POOL_HOST_TOKEN:-}" ]]; then
+    enroll_host
+  fi
+  [[ "$JIT_POOL_HOST_TOKEN" =~ ^[A-Za-z0-9_-]{43}$ ]] || die "JIT_POOL_HOST_TOKEN must be 43 base64url characters"
+  cleanup_all
+  trap 'exit 0' TERM INT
+  trap cleanup_all EXIT
+
+  while true; do
+    result=10
+    count="$(active_count)"
+    if ((count < JIT_POOL_MAX_RUNNERS)); then
+      set +e
+      claim_once
+      result=$?
+      set -e
+      if [[ "$result" == 0 ]]; then
+        idle_since=0
+        continue
+      fi
+      if $once; then
+        wait || true
+        return "$result"
+      fi
+    elif $once; then
+      wait || true
+      return 0
+    fi
+    if ((count == 0 && result == 10)); then
+      now="$(date +%s)"
+      if ((idle_since == 0)); then
+        idle_since="$now"
+      elif ((now - idle_since >= JIT_POOL_IDLE_SECONDS)); then
+        set +e
+        release_idle_host
+        result=$?
+        set -e
+        if [[ "$result" == 0 ]]; then
+          return 0
+        fi
+        if [[ "$result" == 10 ]]; then
+          idle_since=0
+        fi
+      fi
+    else
+      idle_since=0
+    fi
+    sleep "$JIT_POOL_POLL_SECONDS"
+  done
+}
+
+main "$@"

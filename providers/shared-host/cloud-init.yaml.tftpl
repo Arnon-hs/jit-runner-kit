@@ -1,0 +1,47 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+ssh_pwauth: false
+disable_root: true
+
+packages:
+  - ca-certificates
+  - coreutils
+  - curl
+  - docker.io
+  - jq
+
+write_files:
+  - path: /usr/local/bin/jit-runner-pool-agent
+    owner: root:root
+    permissions: '0755'
+    encoding: b64
+    content: __AGENT_B64__
+  - path: /opt/jit-runner-kit/image/Dockerfile
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: __DOCKERFILE_B64__
+  - path: /opt/jit-runner-kit/image/runner-entrypoint.sh
+    owner: root:root
+    permissions: '0555'
+    encoding: b64
+    content: __ENTRYPOINT_B64__
+  - path: /etc/systemd/system/jit-runner-pool-agent.service
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: __UNIT_B64__
+  - path: /etc/jit-runner-kit/pool.env
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: __ENV_B64__
+
+runcmd:
+  - systemctl disable --now ssh.service ssh.socket || true
+  - systemctl enable --now docker
+  - docker pull docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce
+  - docker build --file /opt/jit-runner-kit/image/Dockerfile --build-arg RUNNER_VERSION=2.336.0 --build-arg RUNNER_SHA256_X64=04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d --build-arg RUNNER_SHA256_ARM64=58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1 --tag jit-runner-kit/runner:2.336.0 /opt/jit-runner-kit/image
+  - systemctl daemon-reload
+  - systemctl enable --now jit-runner-pool-agent.service

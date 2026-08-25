@@ -5,9 +5,13 @@ import { createGithubAppJwt } from "../../crypto/src/index";
 export interface GithubAppConfig {
   appId: string;
   privateKey: string;
-  organization: string;
+  runnerScope?: "organization" | "repository";
+  organization?: string;
   runnerGroupId: number;
   trustedWorkflows: readonly string[];
+  trustedEvents: readonly string[];
+  triggerLabel: string;
+  runLabelPrefix: string;
   apiUrl?: string;
   apiVersion?: string;
 }
@@ -28,11 +32,27 @@ interface RunnerGroupResponse {
   selected_workflows?: string[];
 }
 
+interface WorkflowRunResponse {
+  id: number;
+  event: string;
+  head_branch: string | null;
+  head_sha: string;
+  path: string;
+  head_repository: { full_name: string } | null;
+}
+
+interface WorkflowJobsResponse {
+  total_count: number;
+  jobs: Array<{ id: number; status: string; labels: string[] }>;
+}
+
 export class GithubAppRunnerControl implements RunnerControl {
   private readonly apiUrl: string;
   private readonly apiVersion: string;
   private readonly runnerGroupId: number;
+  private readonly runnerScope: "organization" | "repository";
   private readonly trustedWorkflows: string[];
+  private readonly trustedEvents: string[];
 
   constructor(
     private readonly config: GithubAppConfig,
@@ -42,6 +62,10 @@ export class GithubAppRunnerControl implements RunnerControl {
   ) {
     this.apiUrl = config.apiUrl ?? "https://api.github.com";
     this.apiVersion = config.apiVersion ?? "2026-03-10";
+    this.runnerScope = config.runnerScope ?? "organization";
+    if (this.runnerScope === "organization" && !config.organization) {
+      throw new TerminalError("organization is required for organization runner scope");
+    }
     if (!Number.isInteger(config.runnerGroupId) || config.runnerGroupId <= 0) {
       throw new TerminalError("runnerGroupId must be a positive integer");
     }
@@ -50,21 +74,30 @@ export class GithubAppRunnerControl implements RunnerControl {
     if (this.trustedWorkflows.length === 0 || this.trustedWorkflows.some((workflow) => !isPinnedWorkflow(workflow))) {
       throw new TerminalError("trustedWorkflows must contain branch- or SHA-pinned workflow paths");
     }
+    this.trustedEvents = [...new Set(config.trustedEvents.map((event) => event.trim()).filter(Boolean))];
+    if (this.trustedEvents.length === 0 || this.trustedEvents.some((event) => event.includes("pull_request"))) {
+      throw new TerminalError("trustedEvents must be non-empty and must not include pull request events");
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(config.triggerLabel) || !/^[A-Za-z0-9._-]+$/.test(config.runLabelPrefix)) {
+      throw new TerminalError("runner label policy is invalid");
+    }
   }
 
   async assertRepositoryAccess(event: TrustedWorkflowJobEvent): Promise<void> {
     const [owner] = event.repository.fullName.split("/", 1);
-    if (owner?.toLowerCase() !== this.config.organization.toLowerCase()) {
+    if (this.runnerScope === "organization" && owner?.toLowerCase() !== this.config.organization?.toLowerCase()) {
       throw new TerminalError("repository is outside the configured GitHub organization");
     }
     const token = await this.installationToken(event);
-    await this.request(`/repos/${event.repository.fullName}`, token, { method: "GET" });
-    await this.assertRunnerGroupPolicy(token);
+    const repository = await this.request<{ id: number }>(`/repos/${event.repository.fullName}`, token, { method: "GET" });
+    if (repository.id !== event.repository.id) throw new TerminalError("repository identity differs from the signed webhook");
+    await this.assertTrustedRun(event, token);
+    if (this.runnerScope === "organization") await this.assertRunnerGroupPolicy(token);
   }
 
   private async assertRunnerGroupPolicy(token: string): Promise<void> {
     const group = await this.request<RunnerGroupResponse>(
-      `/orgs/${encodeURIComponent(this.config.organization)}/actions/runner-groups/${this.runnerGroupId}`,
+      `/orgs/${encodeURIComponent(this.config.organization ?? "")}/actions/runner-groups/${this.runnerGroupId}`,
       token,
       { method: "GET" },
     );
@@ -87,10 +120,14 @@ export class GithubAppRunnerControl implements RunnerControl {
     runnerName: string,
   ): Promise<JitConfiguration> {
     const token = await this.installationToken(event);
-    await this.assertRunnerGroupPolicy(token);
+    await this.assertTrustedRun(event, token);
+    if (this.runnerScope === "organization") await this.assertRunnerGroupPolicy(token);
     const labels = [...new Set(event.labels)].slice(0, 100);
+    const endpoint = this.runnerScope === "organization"
+      ? `/orgs/${encodeURIComponent(this.config.organization ?? "")}/actions/runners/generate-jitconfig`
+      : `/repos/${event.repository.fullName}/actions/runners/generate-jitconfig`;
     const result = await this.request<JitResponse>(
-      `/orgs/${encodeURIComponent(this.config.organization)}/actions/runners/generate-jitconfig`,
+      endpoint,
       token,
       {
         method: "POST",
@@ -107,12 +144,55 @@ export class GithubAppRunnerControl implements RunnerControl {
 
   async deleteRunner(event: TrustedWorkflowJobEvent, runnerId: number): Promise<void> {
     const token = await this.installationToken(event);
+    const endpoint = this.runnerScope === "organization"
+      ? `/orgs/${encodeURIComponent(this.config.organization ?? "")}/actions/runners/${runnerId}`
+      : `/repos/${event.repository.fullName}/actions/runners/${runnerId}`;
     await this.request(
-      `/orgs/${encodeURIComponent(this.config.organization)}/actions/runners/${runnerId}`,
+      endpoint,
       token,
       { method: "DELETE" },
       true,
     );
+  }
+
+  private async assertTrustedRun(event: TrustedWorkflowJobEvent, token: string): Promise<void> {
+    const run = await this.request<WorkflowRunResponse>(
+      `/repos/${event.repository.fullName}/actions/runs/${event.runId}`,
+      token,
+      { method: "GET" },
+    );
+    if (
+      run.id !== event.runId ||
+      !this.trustedEvents.includes(run.event) ||
+      run.head_repository?.full_name.toLowerCase() !== event.repository.fullName.toLowerCase() ||
+      run.head_branch !== event.headBranch
+    ) {
+      throw new TerminalError("workflow run is outside the trusted event boundary");
+    }
+    const path = run.path.split("@", 1)[0] ?? run.path;
+    const branchSelector = `${event.repository.fullName}/${path}@refs/heads/${run.head_branch}`;
+    const shaSelector = `${event.repository.fullName}/${path}@${run.head_sha}`;
+    if (!this.trustedWorkflows.includes(branchSelector) && !this.trustedWorkflows.includes(shaSelector)) {
+      throw new TerminalError("workflow run path and ref are not trusted");
+    }
+
+    const jobs = await this.request<WorkflowJobsResponse>(
+      `/repos/${event.repository.fullName}/actions/runs/${event.runId}/jobs?filter=latest&per_page=100`,
+      token,
+      { method: "GET" },
+    );
+    if (!Number.isInteger(jobs.total_count) || jobs.total_count !== jobs.jobs.length || jobs.total_count > 100) {
+      throw new TerminalError("workflow run job inventory is incomplete or invalid");
+    }
+    const runLabel = `${this.config.runLabelPrefix}${event.runId}`;
+    const eligible = jobs.jobs.filter((job) =>
+      job.status === "queued" &&
+      job.labels.includes(this.config.triggerLabel) &&
+      job.labels.includes(runLabel)
+    );
+    if (eligible.length !== 1 || eligible[0]?.id !== event.jobId) {
+      throw new TerminalError("workflow run must contain exactly one matching queued JIT job");
+    }
   }
 
   private async installationToken(event: TrustedWorkflowJobEvent): Promise<string> {

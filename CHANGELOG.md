@@ -4,6 +4,37 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- A Cloudflare-controlled `hetzner-pool` compute adapter that scales from zero to one host and runs at most two recommended disposable runner/DinD pairs.
+- An immutable GHCR runner-image workflow and a host agent with bounded idle self-release.
+- Split `ephemeral_*` and `pool_*` inventory plus independent TTL sweeping for both provider ownership labels.
+- Repository-scoped GitHub App mode for private repositories owned by either users or organizations, with a least-privilege App manifest.
+- A release control contract covering one-heavy-job workflow shape, exact-SHA gates, duplicate-release prevention, cleanup inventory, deployment identity, and browser verification.
+- Public endpoint rate limiting plus regression coverage for oversized/non-JSON webhooks, malformed bootstrap requests, untrusted workflow events, and ambiguous queued jobs.
+
+### Changed
+
+- The recommended cost model is now one temporary burst host per pool ID instead of one minimum-billed VM per job; the original ephemeral adapter remains a fallback.
+- Cloudflare provider mutations and alarms are serialized through one Durable Object operation gate.
+- Cloudflare preflight now validates repository or organization scope, trusted non-PR events, scope-specific App permissions, and the Rate Limit binding.
+- Compatibility polling now fails closed unless event, source repository, branch, pinned workflow path, run-scoped label, and a single eligible queued job all match.
+- Examples remove pull-request triggers from privileged JIT paths, disable persisted checkout credentials, and pin toolkit actions to a full commit SHA.
+
+### Fixed
+
+- The Cloudflare bootstrap response now uses the `encoded_jit_config` field consumed by cloud-init.
+- The SSH fallback pins a generated per-run server host key instead of disabling host-key verification.
+
+### Security
+
+- Elastic host discovery and cleanup are scoped by explicit `POOL_ID`; ambiguous create responses recover by labels and fail closed without creating a second host.
+- Pool enrollment is independent of an individual job token, source-IP bound, generation-limited, and never exposes controller credentials to runner containers.
+- Webhook bodies are streamed with a 1 MiB cap before HMAC verification and JSON parsing; unsupported media types fail closed.
+- Malformed bootstrap paths and Bearer token shapes are rejected before Durable Object dispatch, and public routes are rate-limited by source address.
+- Repository and workflow-run identity are revalidated through GitHub immediately before JIT configuration issuance.
+- All pull-request-derived polling events and incomplete/paginated job inventories fail closed before provisioning.
+
 ## [0.2.0] - 2026-08-25
 
 ### Added

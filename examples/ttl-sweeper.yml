@@ -17,8 +17,7 @@ jobs:
   sweep:
     runs-on: ubuntu-latest
     steps:
-      - uses: your-org/jit-runner-kit/actions/sweep@v1
+      - uses: Arnon-hs/jit-runner-kit/actions/sweep@0c605fb873d06bcabc51eaa5725f294ac569b4a6 # v0.2.0
         with:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
           dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
-

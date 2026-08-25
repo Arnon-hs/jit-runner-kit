@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultConfig = resolve(root, "packages/adapter-controller-cloudflare/wrangler.jsonc");
-const defaultManifest = resolve(root, "examples/github-app-manifest.json");
+const defaultManifest = resolve(root, "examples/github-app-repository-manifest.json");
 
 export function validateCloudflareConfig(config, { template = false } = {}) {
   const issues = [];
@@ -16,10 +16,12 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
     "TRUSTED_BRANCHES",
     "TRIGGER_LABEL",
     "RUN_LABEL_PREFIX",
-    "GITHUB_ORGANIZATION",
+    "RUNNER_SCOPE",
     "RUNNER_GROUP_ID",
     "TRUSTED_WORKFLOWS",
+    "TRUSTED_EVENTS",
     "MAX_RUNNERS",
+    "COMPUTE_MODE",
     "TTL_SECONDS",
     "PROVISIONING_TIMEOUT_SECONDS",
     "SERVER_TYPE",
@@ -50,11 +52,17 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
     issues.push("at least one independent cleanup Cron trigger is required");
   }
 
+  const runnerScope = String(vars.RUNNER_SCOPE ?? "").trim();
+  if (!["organization", "repository"].includes(runnerScope)) {
+    issues.push("RUNNER_SCOPE must be organization or repository");
+  }
   const organization = String(vars.GITHUB_ORGANIZATION ?? "").trim().toLowerCase();
+  if (runnerScope === "organization" && !organization) issues.push("GITHUB_ORGANIZATION is required for organization scope");
   const repositories = csv(vars.ALLOWED_REPOSITORIES).map((value) => value.toLowerCase());
   if (repositories.length === 0) issues.push("ALLOWED_REPOSITORIES must not be empty");
   for (const repository of repositories) {
-    if (!repository.startsWith(`${organization}/`) || repository.split("/").length !== 2) {
+    if (repository.split("/").length !== 2) issues.push(`allowed repository must use owner/name: ${repository}`);
+    if (runnerScope === "organization" && !repository.startsWith(`${organization}/`)) {
       issues.push(`allowed repository must belong to GITHUB_ORGANIZATION: ${repository}`);
     }
   }
@@ -71,12 +79,49 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
       issues.push(`trusted workflow repository is not allowlisted: ${match[1]}`);
     }
   }
+  const trustedEvents = csv(vars.TRUSTED_EVENTS);
+  if (trustedEvents.length === 0) issues.push("TRUSTED_EVENTS must not be empty");
+  if (trustedEvents.some((event) => event.includes("pull_request"))) {
+    issues.push("TRUSTED_EVENTS must not include pull request events");
+  }
 
   const maxRunners = integer(vars.MAX_RUNNERS);
   const ttl = integer(vars.TTL_SECONDS);
   const provisioningTimeout = integer(vars.PROVISIONING_TIMEOUT_SECONDS);
   const runnerGroupId = integer(vars.RUNNER_GROUP_ID);
   if (maxRunners < 1 || maxRunners > 20) issues.push("MAX_RUNNERS must be between 1 and 20");
+  const computeMode = String(vars.COMPUTE_MODE ?? "");
+  if (!["hetzner-ephemeral", "shared-host", "hetzner-pool"].includes(computeMode)) {
+    issues.push("COMPUTE_MODE must be hetzner-ephemeral, shared-host, or hetzner-pool");
+  }
+  if (computeMode === "shared-host") {
+    const hostId = String(vars.POOL_HOST_ID ?? "");
+    const hostIpv4 = String(vars.POOL_HOST_IPV4 ?? "");
+    if (!/^[a-z0-9][a-z0-9-]{0,62}$/i.test(hostId)) issues.push("POOL_HOST_ID is invalid for shared-host mode");
+    if (!isIpv4(hostIpv4)) issues.push("POOL_HOST_IPV4 is invalid for shared-host mode");
+    if (maxRunners > 4) issues.push("MAX_RUNNERS must not exceed 4 in shared-host mode");
+  }
+  if (computeMode === "hetzner-pool") {
+    if (maxRunners > 4) issues.push("MAX_RUNNERS must not exceed 4 in hetzner-pool mode");
+    const idleSeconds = integer(vars.POOL_IDLE_SECONDS);
+    if (idleSeconds < 300 || idleSeconds > 3600) {
+      issues.push("POOL_IDLE_SECONDS must be between 300 and 3600 in hetzner-pool mode");
+    }
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(String(vars.POOL_ID ?? ""))) {
+      issues.push("POOL_ID is invalid in hetzner-pool mode");
+    }
+    if (!/^https:\/\//.test(String(vars.POOL_AGENT_URL ?? ""))) {
+      issues.push("POOL_AGENT_URL must use HTTPS in hetzner-pool mode");
+    }
+    if (!/^[a-f0-9]{64}$/i.test(String(vars.POOL_AGENT_SHA256 ?? ""))) {
+      issues.push("POOL_AGENT_SHA256 must be a SHA-256 digest in hetzner-pool mode");
+    }
+    for (const name of ["POOL_RUNNER_IMAGE", "POOL_DIND_IMAGE"]) {
+      if (!/@sha256:[a-f0-9]{64}$/i.test(String(vars[name] ?? ""))) {
+        issues.push(`${name} must use an immutable digest in hetzner-pool mode`);
+      }
+    }
+  }
   if (ttl < 600 || ttl > 86_400) issues.push("TTL_SECONDS must be between 600 and 86400");
   if (provisioningTimeout < 30 || provisioningTimeout >= ttl) {
     issues.push("PROVISIONING_TIMEOUT_SECONDS must be at least 30 and lower than TTL_SECONDS");
@@ -95,7 +140,6 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
 
   if (!template) {
     for (const [name, value] of Object.entries({
-      GITHUB_ORGANIZATION: vars.GITHUB_ORGANIZATION,
       ALLOWED_REPOSITORIES: vars.ALLOWED_REPOSITORIES,
       TRUSTED_WORKFLOWS: vars.TRUSTED_WORKFLOWS,
       PUBLIC_BASE_URL: vars.PUBLIC_BASE_URL,
@@ -108,12 +152,15 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
   return unique(issues);
 }
 
-export function validateGithubAppManifest(manifest, { template = false } = {}) {
+export function validateGithubAppManifest(manifest, { template = false, runnerScope = "organization" } = {}) {
   const issues = [];
   if (manifest?.default_permissions?.actions !== "read") issues.push("GitHub App Actions permission must be read");
   if (manifest?.default_permissions?.metadata !== "read") issues.push("GitHub App Metadata permission must be read");
-  if (manifest?.default_permissions?.organization_self_hosted_runners !== "write") {
-    issues.push("GitHub App organization self-hosted runners permission must be write");
+  if (runnerScope === "organization" && manifest?.default_permissions?.organization_self_hosted_runners !== "write") {
+    issues.push("organization scope requires organization self-hosted runners write");
+  }
+  if (runnerScope === "repository" && manifest?.default_permissions?.administration !== "write") {
+    issues.push("repository scope requires repository Administration write");
   }
   if (!manifest?.default_events?.includes("workflow_job")) issues.push("GitHub App must subscribe to workflow_job");
   if (manifest?.public !== false) issues.push("GitHub App template must default to a private app");
@@ -137,7 +184,7 @@ async function main() {
   const [config, manifest] = await Promise.all([readJsonc(configPath), readJsonc(manifestPath)]);
   const issues = [
     ...validateCloudflareConfig(config, { template }),
-    ...validateGithubAppManifest(manifest, { template }),
+    ...validateGithubAppManifest(manifest, { template, runnerScope: config?.vars?.RUNNER_SCOPE }),
   ];
   if (issues.length > 0) {
     console.error("Cloudflare deployment preflight failed:");
@@ -184,6 +231,15 @@ function csv(value) {
 function integer(value) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : -1;
+}
+
+function isIpv4(value) {
+  const octets = String(value).split(".");
+  return octets.length === 4 && octets.every((octet) => {
+    if (!/^\d{1,3}$/.test(octet) || (octet.length > 1 && octet.startsWith("0"))) return false;
+    const parsed = Number(octet);
+    return parsed >= 0 && parsed <= 255;
+  });
 }
 
 function unique(values) {

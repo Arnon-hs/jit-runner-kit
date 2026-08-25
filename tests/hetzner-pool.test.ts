@@ -1,0 +1,189 @@
+import { describe, expect, it, vi } from "vitest";
+import type { ComputeCreateRequest } from "../packages/contracts/src/index";
+import { TerminalError } from "../packages/contracts/src/index";
+import { HetznerPoolComputeProvider } from "../packages/adapter-compute-hetzner-pool/src/index";
+
+const dind = `docker:27-dind@sha256:${"a".repeat(64)}`;
+const runner = `ghcr.io/owner/runner@sha256:${"b".repeat(64)}`;
+
+describe("elastic Hetzner pool compute adapter", () => {
+  it("reuses at most one host and deletes no provider object during per-job cleanup", async () => {
+    const api = new FakeHetznerPoolApi();
+    const provider = createProvider(api.fetch);
+    const first = await provider.create(request("job-101"));
+    const second = await provider.create(request("job-102"));
+
+    expect(first.serverId).toBe(second.serverId);
+    expect(first.publicIpv4).toBe("192.0.2.10");
+    expect(api.serverCreates).toBe(1);
+    expect(api.firewallCreates).toBe(1);
+    expect(api.lastServerBody?.firewalls).toEqual([{ firewall: 21 }]);
+    expect(api.lastServerBody?.public_net).toEqual({ enable_ipv4: true, enable_ipv6: false });
+    expect(String(api.lastServerBody?.user_data)).not.toContain("bootstrap-token");
+    expect(String(api.lastServerBody?.user_data)).toContain("#cloud-config");
+
+    await provider.delete(first);
+    expect(api.deletes).toEqual([]);
+  });
+
+  it("releases one idle host with its IPv4 and firewall and is idempotent", async () => {
+    const api = new FakeHetznerPoolApi();
+    const provider = createProvider(api.fetch);
+    await provider.create(request("job-101"));
+    expect(await provider.releaseIdleHost("198.51.100.8")).toBe(false);
+    expect(await provider.releaseIdleHost("192.0.2.10")).toBe(true);
+    expect(api.deletes).toEqual(["servers/11", "primary_ips/31", "firewalls/21"]);
+    expect(await provider.releaseIdleHost("192.0.2.10")).toBe(false);
+  });
+
+  it("fails closed instead of creating a second pool host", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.servers = [api.makeServer(11), api.makeServer(12)];
+    const provider = createProvider(api.fetch);
+    await expect(provider.create(request("job-101"))).rejects.toBeInstanceOf(TerminalError);
+    expect(api.serverCreates).toBe(0);
+  });
+
+  it("recovers an already-created host after an ambiguous server-create response", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.loseFirstServerCreateResponse = true;
+    const provider = createProvider(api.fetch);
+
+    const resource = await provider.create(request("job-101"));
+
+    expect(resource.serverId).toBe("11");
+    expect(api.serverCreates).toBe(1);
+    expect(api.servers).toHaveLength(1);
+  });
+
+  it("scopes discovery and cleanup to one explicit pool id", async () => {
+    const api = new FakeHetznerPoolApi();
+    const canary = createProvider(api.fetch, "canary");
+    const production = createProvider(api.fetch, "production");
+    const first = await canary.create(request("job-101"));
+    const second = await production.create(request("job-102"));
+
+    expect(first.serverId).not.toBe(second.serverId);
+    expect(api.servers).toHaveLength(2);
+    expect(await canary.releaseIdleHost(first.publicIpv4)).toBe(true);
+    expect(api.servers).toHaveLength(1);
+    expect(api.servers[0]?.labels.pool_id).toBe("production");
+  });
+});
+
+function createProvider(fetcher: typeof fetch, poolId = "canary"): HetznerPoolComputeProvider {
+  return new HetznerPoolComputeProvider({
+    token: "test-token",
+    controllerUrl: "https://controller.example.test",
+    agentUrl: "https://raw.githubusercontent.com/owner/repository/0123456789012345678901234567890123456789/bin/jit-runner-pool-agent",
+    agentSha256: "c".repeat(64),
+    runnerImage: runner,
+    dindImage: dind,
+    maxRunners: 2,
+    idleSeconds: 600,
+    enrollmentToken: "e".repeat(43),
+    poolId,
+    apiUrl: "https://api.example.test/v1",
+  }, fetcher);
+}
+
+function request(jobKey: string): ComputeCreateRequest {
+  return {
+    jobKey,
+    repository: "owner/repository",
+    serverName: "ignored-per-job-name",
+    serverType: "cx33",
+    location: "fsn1",
+    image: "ubuntu-24.04",
+    architecture: "x64",
+    expiresAt: 2_000,
+    provisioningAttempt: 1,
+    bootstrapToken: "bootstrap-token",
+    bootstrapTokenHash: "d".repeat(64),
+    bootstrapUrl: "https://controller.example.test/v1/bootstrap/job-101",
+  };
+}
+
+class FakeHetznerPoolApi {
+  servers: Array<ReturnType<FakeHetznerPoolApi["makeServer"]>> = [];
+  firewalls: Array<{ id: number; labels: Record<string, string> }> = [];
+  ips: Array<{ id: number; ip: string; labels: Record<string, string> }> = [];
+  serverCreates = 0;
+  firewallCreates = 0;
+  deletes: string[] = [];
+  lastServerBody: Record<string, unknown> | undefined;
+  loseFirstServerCreateResponse = false;
+  private nextServerId = 11;
+  private nextFirewallId = 21;
+  private nextIpId = 31;
+
+  readonly fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input));
+    const path = url.pathname.replace(/^\/v1\//, "");
+    const method = init?.method ?? "GET";
+    const poolId = new URLSearchParams(url.search).get("label_selector")
+      ?.split(",")
+      .find((part) => part.startsWith("pool_id="))
+      ?.slice("pool_id=".length);
+    const scoped = <T extends { labels: Record<string, string> }>(items: T[]) =>
+      poolId ? items.filter((item) => item.labels.pool_id === poolId) : items;
+    if (method === "GET") {
+      if (path === "servers") return Response.json({ servers: scoped(this.servers) });
+      if (path === "firewalls") return Response.json({ firewalls: scoped(this.firewalls) });
+      if (path === "primary_ips") return Response.json({ primary_ips: scoped(this.ips) });
+    }
+    if (method === "POST" && path === "firewalls") {
+      this.firewallCreates += 1;
+      const body = JSON.parse(String(init?.body)) as { labels: Record<string, string> };
+      const firewall = { id: this.nextFirewallId++, labels: body.labels };
+      this.firewalls.push(firewall);
+      return Response.json({ firewall }, { status: 201 });
+    }
+    if (method === "POST" && path === "servers") {
+      this.serverCreates += 1;
+      this.lastServerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const serverId = this.nextServerId++;
+      const ipId = this.nextIpId++;
+      const ip = `192.0.2.${serverId - 1}`;
+      const server = this.makeServer(serverId, this.lastServerBody.labels as Record<string, string>, ipId, ip);
+      this.servers.push(server);
+      this.ips.push({ id: ipId, ip, labels: {} });
+      if (this.loseFirstServerCreateResponse) {
+        this.loseFirstServerCreateResponse = false;
+        return Response.json({ error: { message: "gateway timeout" } }, { status: 503 });
+      }
+      return Response.json({ server }, { status: 201 });
+    }
+    if (method === "PUT") {
+      const labels = (JSON.parse(String(init?.body)) as { labels: Record<string, string> }).labels;
+      const [kind, rawId] = path.split("/");
+      const id = Number(rawId);
+      const target = kind === "servers"
+        ? this.servers.find((item) => item.id === id)
+        : kind === "primary_ips"
+          ? this.ips.find((item) => item.id === id)
+          : this.firewalls.find((item) => item.id === id);
+      if (target) target.labels = labels;
+      return new Response(null, { status: 204 });
+    }
+    if (method === "DELETE") {
+      this.deletes.push(path);
+      const [kind, rawId] = path.split("/");
+      const id = Number(rawId);
+      if (kind === "servers") this.servers = this.servers.filter((item) => item.id !== id);
+      if (kind === "primary_ips") this.ips = this.ips.filter((item) => item.id !== id);
+      if (kind === "firewalls") this.firewalls = this.firewalls.filter((item) => item.id !== id);
+      return new Response(null, { status: 204 });
+    }
+    return Response.json({ error: { message: `${method} ${path} not mocked` } }, { status: 500 });
+  }) as unknown as typeof fetch;
+
+  makeServer(
+    id: number,
+    labels: Record<string, string> = { expires_at: "2600", pool_id: "canary" },
+    ipId = 31,
+    ip = "192.0.2.10",
+  ) {
+    return { id, labels, public_net: { ipv4: { id: ipId, ip } } };
+  }
+}

@@ -6,9 +6,9 @@ JIT Runner Kit keeps lifecycle policy in a provider-agnostic core and puts deplo
 
 ## Invariants
 
-- One workflow job receives one VM and one JIT registration.
+- The recommended compute adapter creates at most one burst host per pool ID; each workflow job receives one disposable runner/DinD pair and one JIT registration.
 - Only authenticated, allowlisted `workflow_job` events from trusted repositories can create compute.
-- Serverless runners belong to a private organization runner group restricted to exact trusted workflow definitions; a run-scoped label adds routing defense in depth but is not a job binding.
+- Repository scope binds the private App installation to selected repositories and revalidates the exact trusted run/job; organization scope additionally requires a private runner group restricted to exact trusted workflows. A run-scoped label is routing defense in depth, not a job binding.
 - Event delivery is at-least-once; every transition and provider operation must therefore be idempotent.
 - Provisioning claims have a shorter recovery deadline than the job TTL so a Worker crash cannot strand a queued job indefinitely.
 - Provider resources carry a monotonic attempt fence so interleaved stale calls cannot delete a newer winner.
@@ -68,13 +68,14 @@ The first compute adapter uses the Hetzner Cloud API. It owns Hetzner request/re
 ```text
 workflow_job: queued
   -> verify signature, installation, repository, event, branch, static label, run-scoped label
-  -> verify the organization runner group's private, exact-workflow policy
+  -> verify repository-scoped App access and exact run/job metadata
+  -> in organization scope, verify the private exact-workflow runner group
   -> create or load idempotent job record
   -> acquire concurrency lease
-  -> create labeled VM with a one-time bootstrap token
-  -> VM exchanges the unexpired token after attestation checks and an atomic state claim
+  -> create or reuse one labeled pool host with a source-bound enrollment token
+  -> host enrolls once, then atomically claims waiting jobs
   -> controller requests JIT config and returns it once
-  -> runner executes exactly one job
+  -> pool host executes at most two jobs in disposable runner/DinD pairs
 
 workflow_job: completed
   -> transition to cleaning
@@ -113,4 +114,4 @@ Future Cloud Run, AWS Lambda, conventional webhook-service, or compute-provider 
 
 ## Delivery boundary
 
-The current Bash/OpenTofu GitHub control-job mode remains supported. The Cloudflare adapter is ready for a dedicated-project canary, not an unqualified production rollout. Operators must complete the checklist in [Deploy the Cloudflare controller](cloudflare-controller.md), including success, failure, cancellation, DLQ, and TTL cleanup evidence with a final empty Hetzner inventory.
+The current Bash/OpenTofu GitHub control-job mode remains supported as compatibility fallback. The Cloudflare adapter is ready for a dedicated-project canary, not an unqualified production rollout. Operators must complete the checklist in [Deploy the Cloudflare controller](cloudflare-controller.md), including success, failure, cancellation, concurrent two-job isolation, DLQ, idle release, and TTL cleanup evidence with a final empty Hetzner inventory.

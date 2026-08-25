@@ -5,5 +5,5 @@ export function validateCloudflareConfig(
 ): string[];
 export function validateGithubAppManifest(
   manifest: Record<string, any>,
-  options?: { template?: boolean },
+  options?: { template?: boolean; runnerScope?: "organization" | "repository" },
 ): string[];

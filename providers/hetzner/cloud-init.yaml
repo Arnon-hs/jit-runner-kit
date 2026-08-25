@@ -25,6 +25,19 @@ users:
     shell: /bin/bash
     lock_passwd: true
 
+write_files:
+  - path: /etc/ssh/ssh_host_ed25519_key
+    owner: root:root
+    permissions: '0600'
+    encoding: b64
+    content: ${ssh_host_private_key_b64}
+  - path: /etc/ssh/ssh_host_ed25519_key.pub
+    owner: root:root
+    permissions: '0644'
+    encoding: b64
+    content: ${ssh_host_public_key_b64}
+
 runcmd:
+  - systemctl restart ssh
   - systemctl enable --now docker
   - install -d -o runner -g runner /opt/actions-runner

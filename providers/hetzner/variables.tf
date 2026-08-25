@@ -36,6 +36,17 @@ variable "public_key" {
   type        = string
 }
 
+variable "ssh_host_private_key" {
+  description = "Ephemeral SSH server host private key used for controller-side pinning."
+  type        = string
+  sensitive   = true
+}
+
+variable "ssh_host_public_key" {
+  description = "Ephemeral SSH server host public key used for controller-side pinning."
+  type        = string
+}
+
 variable "ssh_allowed_cidr" {
   description = "IPv4 CIDR allowed to reach SSH."
   type        = string
@@ -45,4 +56,3 @@ variable "expires_at" {
   description = "Unix epoch used by the independent TTL sweeper."
   type        = number
 }
-

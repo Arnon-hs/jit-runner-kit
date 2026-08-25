@@ -39,6 +39,16 @@
       }
     ]
   },
+  "ratelimits": [
+    {
+      "name": "PUBLIC_RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 120,
+        "period": 60
+      }
+    }
+  ],
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
@@ -47,10 +57,19 @@
     "TRUSTED_BRANCHES": "main",
     "TRIGGER_LABEL": "jit-runner",
     "RUN_LABEL_PREFIX": "jit-run-",
+    "RUNNER_SCOPE": "repository",
+    "TRUSTED_EVENTS": "push,workflow_dispatch",
     "GITHUB_ORGANIZATION": "your-github-organization",
     "RUNNER_GROUP_ID": "2",
     "TRUSTED_WORKFLOWS": "your-github-organization/example/.github/workflows/ci.yml@refs/heads/main",
     "MAX_RUNNERS": "2",
+    "COMPUTE_MODE": "hetzner-pool",
+    "POOL_ID": "example",
+    "POOL_IDLE_SECONDS": "600",
+    "POOL_AGENT_URL": "https://raw.githubusercontent.com/your-github-organization/jit-runner-kit/0123456789012345678901234567890123456789/bin/jit-runner-pool-agent",
+    "POOL_AGENT_SHA256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "POOL_RUNNER_IMAGE": "ghcr.io/your-github-organization/jit-runner-kit-runner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "POOL_DIND_IMAGE": "docker.io/library/docker:27-dind@sha256:aa3df78ecf320f5fafdce71c659f1629e96e9de0968305fe1de670e0ca9176ce",
     "TTL_SECONDS": "10800",
     "PROVISIONING_TIMEOUT_SECONDS": "300",
     "SERVER_TYPE": "cx33",

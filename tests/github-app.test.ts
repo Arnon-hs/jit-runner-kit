@@ -57,6 +57,32 @@ describe("GitHub App runner control", () => {
     expect(urls).toContain("https://api.github.test/orgs/owner/actions/runners/9001");
   });
 
+  it("creates and deletes JIT runners through repository endpoints without organization permissions", async () => {
+    const fetcher = githubFetcher({ selected_workflows: [workflow] });
+    const control = createControl(fetcher, [workflow], "repository");
+    await expect(control.assertRepositoryAccess(event)).resolves.toBeUndefined();
+    await expect(control.createJitConfiguration(event, "jit-101")).resolves.toEqual({
+      encodedJitConfig: "encoded-jit-config",
+      runnerId: 9001,
+    });
+    await control.deleteRunner(event, 9001);
+    const urls = fetcher.mock.calls.map(([url]) => String(url));
+    expect(urls).not.toContain("https://api.github.test/orgs/owner/actions/runner-groups/42");
+    expect(urls).toContain("https://api.github.test/repos/owner/repository/actions/runners/generate-jitconfig");
+    expect(urls).toContain("https://api.github.test/repos/owner/repository/actions/runners/9001");
+  });
+
+  it("rejects an untrusted event and ambiguous matching jobs", async () => {
+    const untrustedEvent = githubFetcher({ selected_workflows: [workflow], event: "pull_request" });
+    await expect(createControl(untrustedEvent).assertRepositoryAccess(event)).rejects.toThrow("trusted event boundary");
+
+    const ambiguous = githubFetcher({ selected_workflows: [workflow], duplicateJob: true });
+    await expect(createControl(ambiguous).assertRepositoryAccess(event)).rejects.toThrow("exactly one matching queued JIT job");
+
+    const incomplete = githubFetcher({ selected_workflows: [workflow], incompleteJobInventory: true });
+    await expect(createControl(incomplete).assertRepositoryAccess(event)).rejects.toThrow("job inventory is incomplete");
+  });
+
   it("rejects workflow selectors that are not pinned to a branch or commit SHA", () => {
     expect(() => createControl(githubFetcher({ selected_workflows: [] }), [
       "owner/repository/.github/workflows/ci.yml",
@@ -64,14 +90,22 @@ describe("GitHub App runner control", () => {
   });
 });
 
-function createControl(fetcher: ReturnType<typeof githubFetcher>, trustedWorkflows = [workflow]) {
+function createControl(
+  fetcher: ReturnType<typeof githubFetcher>,
+  trustedWorkflows = [workflow],
+  runnerScope: "organization" | "repository" = "organization",
+) {
   return new GithubAppRunnerControl(
     {
       appId: "1",
       privateKey: "test-private-key",
+      runnerScope,
       organization: "owner",
       runnerGroupId: 42,
       trustedWorkflows,
+      trustedEvents: ["push", "workflow_dispatch"],
+      triggerLabel: "jit-runner",
+      runLabelPrefix: "jit-run-",
       apiUrl: "https://api.github.test",
     },
     fetcher as unknown as typeof fetch,
@@ -84,12 +118,30 @@ function githubFetcher(group: {
   selected_workflows: string[];
   allows_public_repositories?: boolean | undefined;
   restricted_to_workflows?: boolean | undefined;
+  event?: string;
+  duplicateJob?: boolean;
+  incompleteJobInventory?: boolean;
 }) {
   return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
     if (url.endsWith("/app/installations/7/access_tokens")) return json({ token: "installation-token" });
     if (url.endsWith("/repos/owner/repository")) return json({ id: 3 });
+    if (url.endsWith("/repos/owner/repository/actions/runs/51")) {
+      return json({
+        id: 51,
+        event: group.event ?? "push",
+        head_branch: "main",
+        head_sha: "a".repeat(40),
+        path: ".github/workflows/ci.yml",
+        head_repository: { full_name: "owner/repository" },
+      });
+    }
+    if (url.endsWith("/repos/owner/repository/actions/runs/51/jobs?filter=latest&per_page=100")) {
+      const job = { id: 101, status: "queued", labels: ["self-hosted", "jit-runner", "jit-run-51"] };
+      const jobs = group.duplicateJob ? [job, { ...job, id: 102 }] : [job];
+      return json({ total_count: group.incompleteJobInventory ? 101 : jobs.length, jobs });
+    }
     if (url.endsWith("/orgs/owner/actions/runner-groups/42")) {
       return json({
         id: 42,
@@ -101,7 +153,13 @@ function githubFetcher(group: {
     if (url.endsWith("/orgs/owner/actions/runners/generate-jitconfig")) {
       return json({ encoded_jit_config: "encoded-jit-config", runner: { id: 9001 } });
     }
+    if (url.endsWith("/repos/owner/repository/actions/runners/generate-jitconfig")) {
+      return json({ encoded_jit_config: "encoded-jit-config", runner: { id: 9001 } });
+    }
     if (method === "DELETE" && url.endsWith("/orgs/owner/actions/runners/9001")) {
+      return new Response(null, { status: 204 });
+    }
+    if (method === "DELETE" && url.endsWith("/repos/owner/repository/actions/runners/9001")) {
       return new Response(null, { status: 204 });
     }
     throw new Error(`unexpected request ${method} ${url}`);
