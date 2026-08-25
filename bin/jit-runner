@@ -309,7 +309,7 @@ write_output() {
 delete_labeled_resources() {
   local selector="$1"
   local dry_run="$2"
-  local resource endpoint ids id
+  local resource endpoint ids id attempt
   for resource in servers firewalls primary_ips ssh_keys; do
     endpoint="$resource"
     ids="$(hcloud_request GET "$endpoint" --get --data-urlencode "label_selector=${selector}" | jq -r --arg resource "$resource" '.[$resource][].id')"
@@ -318,8 +318,18 @@ delete_labeled_resources() {
       if [[ "$dry_run" == true ]]; then
         printf 'would-delete %s/%s\n' "$resource" "$id"
       else
-        hcloud_request DELETE "${endpoint}/${id}" >/dev/null || true
-        printf 'deleted %s/%s\n' "$resource" "$id"
+        for attempt in $(seq 1 30); do
+          if ! hcloud_request GET "${endpoint}/${id}" >/dev/null 2>&1; then
+            printf 'deleted %s/%s\n' "$resource" "$id"
+            break
+          fi
+          hcloud_request DELETE "${endpoint}/${id}" >/dev/null 2>&1 || true
+          sleep 2
+        done
+        if (( attempt == 30 )) && hcloud_request GET "${endpoint}/${id}" >/dev/null 2>&1; then
+          printf 'error: timed out deleting %s/%s\n' "$resource" "$id" >&2
+          return 1
+        fi
       fi
     done <<<"$ids"
   done

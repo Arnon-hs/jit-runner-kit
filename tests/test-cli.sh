@@ -29,6 +29,9 @@ cat >"$TEST_TMP/bin/curl" <<'MOCK_CURL'
 set -Eeuo pipefail
 url="${*: -1}"
 printf '%s\n' "$url" >>"$MOCK_CURL_LOG"
+if [[ "$*" == *"--request GET"* && "$url" =~ /(servers|firewalls|primary_ips|ssh_keys)/[0-9]+$ ]]; then
+  exit 22
+fi
 case "$url" in
   https://api.ipify.org) printf '192.0.2.10' ;;
   */repos/actions/runner/releases/latest)
