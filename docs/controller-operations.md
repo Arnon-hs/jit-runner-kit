@@ -62,6 +62,30 @@ exec /opt/jit-runner-kit/bin/jit-runner-controller \
 
 Set the service to restart after an unexpected exit, but retain a short restart delay so authentication or provider outages do not create a tight loop.
 
+A hardened starting unit is available at [`examples/jit-runner-controller.service`](../examples/jit-runner-controller.service). Copy it to `/etc/systemd/system`, create the dedicated account and directories named in the unit, set `state_root` in `controller.json` to `/var/lib/jit-runner-kit/jobs`, and put only the two required token assignments in `/etc/jit-runner-kit/controller.env` with owner `root` and mode `0600`.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now jit-runner-controller.service
+sudo systemctl status jit-runner-controller.service
+```
+
+## Retain useful logs without retaining secrets
+
+The example sends controller output to the system journal. Keep enough history to correlate a workflow job, runner name, run key, provider resource IDs, and cleanup result. Do not log token values, JIT configuration, private keys, infrastructure state, application secrets, or workload output that may contain them.
+
+For a small controller host, a bounded journal is a reasonable starting point. Configure retention in `/etc/systemd/journald.conf.d/jit-runner-kit.conf`, for example:
+
+```ini
+[Journal]
+SystemMaxUse=500M
+MaxRetentionSec=14day
+Compress=yes
+Seal=yes
+```
+
+These are host-wide journald settings, so review them with the host operator before applying them. For production release auditability, forward sanitized controller lifecycle events to protected external storage with access control and its own retention policy. Ephemeral workload logs remain GitHub Actions logs unless the workflow explicitly forwards them; destroying the VM also destroys its local journal.
+
 ## Safe restart procedure
 
 1. Check every job state under `state_root/jobs`. Wait until no job is `provisioning`, `watching`, or `cleaning`.

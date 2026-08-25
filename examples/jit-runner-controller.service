@@ -1,0 +1,40 @@
+[Unit]
+Description=JIT Runner Kit compatibility controller
+Documentation=https://github.com/Arnon-hs/jit-runner-kit/blob/main/docs/controller-operations.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jit-runner
+Group=jit-runner
+WorkingDirectory=/opt/jit-runner-kit
+EnvironmentFile=/etc/jit-runner-kit/controller.env
+Environment=TF_PLUGIN_CACHE_DIR=/var/cache/jit-runner-kit/plugin-cache
+ExecStart=/opt/jit-runner-kit/bin/jit-runner-controller --config /etc/jit-runner-kit/controller.json
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=30s
+UMask=0077
+
+StateDirectory=jit-runner-kit
+CacheDirectory=jit-runner-kit
+ReadWritePaths=/var/lib/jit-runner-kit /var/cache/jit-runner-kit
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jit-runner-controller
+
+[Install]
+WantedBy=multi-user.target

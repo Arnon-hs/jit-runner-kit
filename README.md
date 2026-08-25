@@ -42,7 +42,7 @@ The Hetzner image installs Docker with Compose v2, GitHub CLI, ShellCheck, PHP C
 
 Need another shell, language runtime, or system library? The runner image is deliberately built from a small, readable cloud-init file. See [Customize the runner image](docs/custom-runner-image.md) for safe package-list changes, Bash/Zsh/Fish examples, third-party repository guidance, custom images, and validation steps.
 
-Need concurrent jobs or an always-on controller? See [Operate the controller](docs/controller-operations.md) for the control-plane roles, one-VM-per-job isolation model, `max_runners` sizing, macOS/Linux service guidance, and recovery checks.
+Need concurrent jobs or an always-on controller? See [Operate the controller](docs/controller-operations.md) for the control-plane roles, one-VM-per-job isolation model, `max_runners` sizing, a hardened `systemd` example, log-retention guidance, and recovery checks.
 
 ## Choose an operating mode
 
@@ -174,7 +174,7 @@ Use `make IAC=terraform check` to validate with Terraform. The test suite uses m
 
 ## Scope and roadmap
 
-The project provisions ephemeral GitHub Actions JIT runners and cleans up their infrastructure. It does not deploy applications, manage application secrets, or provide a general-purpose CI scheduler. See [VISION.md](VISION.md) and [ROADMAP.md](ROADMAP.md).
+The project provisions ephemeral GitHub Actions JIT runners and cleans up their infrastructure. It does not deploy applications, manage application secrets, or provide a general-purpose CI scheduler. See [VISION.md](VISION.md), [ROADMAP.md](ROADMAP.md), and [CHANGELOG.md](CHANGELOG.md).
 
 ## Support and community
 
