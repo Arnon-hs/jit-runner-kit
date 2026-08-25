@@ -11,7 +11,21 @@ permissions:
 
 jobs:
   check:
-    if: ${{ vars.JIT_RUNNER_ENABLED == 'true' }}
+    name: Public quality gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: 1.12.6
+          tofu_wrapper: false
+      - run: make check
+
+  dogfood-jit:
+    name: Trusted JIT dogfood
+    if: ${{ github.event_name == 'workflow_dispatch' && vars.JIT_RUNNER_ENABLED == 'true' }}
     runs-on: [self-hosted, linux, x64, jit-runner]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

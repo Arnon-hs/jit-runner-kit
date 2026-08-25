@@ -152,6 +152,7 @@ bin/jit-runner sweep
 ## Trust and failure boundaries
 
 - Use the current design only for repositories and contributors you trust. A workflow job fully controls its runner VM.
+- Keep public fork pull requests on GitHub-hosted or otherwise isolated, secret-free runners. This repository's own public quality job follows that pattern; JIT dogfooding is manual and disabled by default.
 - Never expose runner-administration or deployment secrets to untrusted pull-request code.
 - Keep runner VMs outside production networks and accounts.
 - SSH is restricted to the controller's observed public IPv4 by default.
