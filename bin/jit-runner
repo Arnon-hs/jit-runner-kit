@@ -96,6 +96,31 @@ iac_init() {
   iac -chdir="$TF_DIR" init -input=false -no-color >/dev/null
 }
 
+iac_apply_with_retry() {
+  local attempt=1
+  local max_attempts=4
+  local delay output status
+  while (( attempt <= max_attempts )); do
+    set +e
+    output="$(iac "$@" 2>&1)"
+    status=$?
+    set -e
+    printf '%s\n' "$output"
+    (( status == 0 )) && return 0
+
+    if (( attempt == max_attempts )) ||
+      ! grep -Eqi 'resource_unavailable|temporar(il)?y unavailable|rate.?limit|too many requests|timeout' <<<"$output"; then
+      return "$status"
+    fi
+    delay=$((15 * attempt))
+    printf 'warning: infrastructure provider is temporarily unavailable; retrying apply in %s seconds (attempt %s/%s)\n' \
+      "$delay" "$attempt" "$max_attempts" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 hcloud_request() {
   local method="$1"
   local endpoint="$2"
@@ -448,7 +473,7 @@ cmd_provision() {
     '{run_key:$run_key,repository:$repository,runner_id:$runner_id,server_name:$server_name,server_type:$server_type,location:$location,image:$image,public_key:$public_key,ssh_allowed_cidr:$ssh_allowed_cidr,expires_at:$expires_at}' \
     >"$metadata_file"
 
-  iac -chdir="$TF_DIR" apply -input=false -auto-approve -no-color \
+  iac_apply_with_retry -chdir="$TF_DIR" apply -input=false -auto-approve -no-color \
     -state="$state_file" \
     -var="run_key=${run_key}" \
     -var="server_name=${server_name}" \

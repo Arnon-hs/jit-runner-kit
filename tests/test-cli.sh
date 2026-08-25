@@ -69,7 +69,14 @@ for argument in "$@"; do
   esac
 done
 case " $* " in
-  *" apply "*) : >"$state_file" ;;
+  *" apply "*)
+    if [[ -n "${MOCK_TOFU_FAIL_ONCE:-}" && ! -e "${MOCK_TOFU_FAIL_ONCE}.failed" ]]; then
+      : >"${MOCK_TOFU_FAIL_ONCE}.failed"
+      printf 'Error: error during placement (resource_unavailable)\n' >&2
+      exit 1
+    fi
+    : >"$state_file"
+    ;;
   *" output "*" public_ipv4 "*) printf '192.0.2.20' ;;
   *" output "*" server_id "*) printf '123' ;;
 esac
@@ -110,12 +117,14 @@ grep -q '/repos/owner/repository/actions/runners/777$' "$MOCK_CURL_LOG"
 
 set +e
 provision_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test \
+  MOCK_TOFU_FAIL_ONCE="$TEST_TMP/tofu-apply" \
   JIT_RUNNER_GITHUB_TOKEN=test "$CLI" provision --repository owner/repository \
   --run-id 123 --state-dir "$TEST_TMP/failed-provision-state" 2>&1)"
 provision_status=$?
 set -e
 [[ $provision_status -ne 0 ]]
 [[ "$provision_output" == *"provisioning failed; removing temporary resources"* ]]
+[[ "$provision_output" == *"retrying apply"* ]]
 [[ "$provision_output" != *"unbound variable"* ]]
 grep -q '/repos/owner/repository/actions/runners/888$' "$MOCK_CURL_LOG"
 
