@@ -1,9 +1,9 @@
 name: CI with an ephemeral runner
 
 on:
-  pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,7 +21,7 @@ jobs:
       run-key: ${{ steps.runner.outputs.run-key }}
     steps:
       - id: runner
-        uses: your-org/jit-runner-kit/actions/provision@v1
+        uses: Arnon-hs/jit-runner-kit/actions/provision@0c605fb873d06bcabc51eaa5725f294ac569b4a6 # v0.2.0
         with:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
           github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
@@ -41,6 +41,8 @@ jobs:
     runs-on: [self-hosted, linux, x64, "${{ needs.provision.outputs.runner-label }}"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Run any project CI command
         run: ./your-ci-command
 
@@ -54,7 +56,7 @@ jobs:
         with:
           name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/jit-runner-state
-      - uses: your-org/jit-runner-kit/actions/destroy@v1
+      - uses: Arnon-hs/jit-runner-kit/actions/destroy@0c605fb873d06bcabc51eaa5725f294ac569b4a6 # v0.2.0
         with:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
           github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}

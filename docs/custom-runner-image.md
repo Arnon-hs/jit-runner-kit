@@ -1,12 +1,12 @@
 # Customize the runner image
 
-The default Hetzner runner starts from Ubuntu 24.04 and is prepared by [`providers/hetzner/cloud-init.yaml`](../providers/hetzner/cloud-init.yaml). Change that file when every ephemeral runner managed by your checkout needs another Ubuntu package, command shell, language runtime, or system library.
+The one-VM-per-job compatibility runner starts from Ubuntu 24.04 and is prepared by [`providers/hetzner/cloud-init.yaml`](../providers/hetzner/cloud-init.yaml). The recommended scale-to-zero pool uses [`providers/shared-host/Dockerfile.runner`](../providers/shared-host/Dockerfile.runner) instead. Change the file for the operating mode you actually deploy when every runner needs another Ubuntu package, command shell, language runtime, or system library.
 
 Keep application-specific setup in the application workflow when it benefits from an official, checksum-aware setup action or must vary between jobs. Put stable operating-system dependencies in cloud-init when downloading them for every workflow would be slower or less reliable.
 
 ## Add Ubuntu packages
 
-Add package names to the `packages` list. Cloud-init installs them as `root` before the JIT runner registers with GitHub.
+For the compatibility VM, add package names to the cloud-init `packages` list. For the pool image, add them to the `apt-get install --yes --no-install-recommends` list in `Dockerfile.runner`. Both install as root before the JIT runner starts.
 
 ```yaml
 packages:
@@ -79,7 +79,7 @@ users:
     lock_passwd: true
 ```
 
-This changes the login shell for the `runner` account. A GitHub Actions `run:` step still uses the workflow's configured shell, or the platform default, so request a non-default shell explicitly when needed:
+For the pool image, install the shell in `Dockerfile.runner` and pass `--shell /usr/bin/zsh` (or Fish) to `useradd`. This changes the login shell for the `runner` account. A GitHub Actions `run:` step still uses the workflow's configured shell, or the platform default, so request a non-default shell explicitly when needed:
 
 ```yaml
 - name: Run with Zsh
@@ -105,7 +105,13 @@ Avoid piping an unauthenticated remote script into a privileged shell. Prefer Ub
 
 Do not place GitHub tokens, cloud credentials, JIT configuration, or application secrets in cloud-init. Cloud providers can retain user-data, and local infrastructure state must be treated as operational metadata rather than a secret transport.
 
-## Use a prebuilt image
+## Publish the pool runner image
+
+The repository's `Runner image` workflow builds `providers/shared-host/Dockerfile.runner` after a relevant merge to `main` and pushes a commit-tagged image to GHCR. Record the workflow's `image@sha256:...` identity and put that exact digest in `POOL_RUNNER_IMAGE`; never configure a mutable tag in the Worker.
+
+Forks can keep the workflow and change only its lowercase `IMAGE` value. Add shells, PHP extensions, Node/Python/Ruby runtimes, databases clients, or OS libraries to the Dockerfile, then run a ready PR through the normal quality and security review. After merge, use the new digest in a Worker revision and repeat success/failure cleanup canaries before production use.
+
+## Use a prebuilt VM image
 
 When setup becomes large or changes infrequently, bake and harden a custom Hetzner snapshot instead of expanding cloud-init indefinitely. Pass its image identifier through the existing controller or CLI `image` setting.
 
@@ -131,10 +137,12 @@ Keep the snapshot free of runner registrations and credentials. Patch and rebuil
 
 | Requirement | Recommended layer |
 | --- | --- |
-| Common Ubuntu library on every runner | `cloud-init.yaml` package list |
-| Different login shell on every runner | Package list plus `users.runner.shell` |
+| Common Ubuntu library in the elastic pool | `Dockerfile.runner` apt list |
+| Common Ubuntu library in compatibility VMs | `cloud-init.yaml` package list |
+| Different login shell in pool containers | Dockerfile package plus `useradd --shell` |
+| Different login shell in compatibility VMs | Package list plus `users.runner.shell` |
 | Per-repository language or version | Pinned GitHub setup action in that workflow |
 | Large, stable toolchain | Hardened custom cloud image |
 | Token or deployment credential | GitHub secret injected only into the required step |
 
-After any image change, verify both the successful-job and failed-job cleanup paths. The VM, Primary IPv4, firewall, SSH key, and GitHub runner record should all be gone after the controller finishes.
+After any image change, verify successful, failed, and cancelled jobs. In pool mode also verify two concurrent disposable containers on at most one VM, then zero servers, Primary IPv4s, firewalls, SSH keys, and GitHub runner records after the idle window.

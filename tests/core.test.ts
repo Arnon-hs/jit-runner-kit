@@ -15,6 +15,7 @@ import type {
 } from "../packages/contracts/src/index";
 import { RetryableError, TerminalError } from "../packages/contracts/src/index";
 import { Controller, trustWorkflowJobPayload } from "../packages/core/src/index";
+import { SharedHostComputeProvider } from "../packages/adapter-compute-shared-host/src/index";
 
 const event: TrustedWorkflowJobEvent = {
   deliveryId: "00000000-0000-4000-8000-000000000001",
@@ -95,6 +96,61 @@ describe("provider-agnostic controller", () => {
       fixture.controller.handleWorkflowJob({ ...event, jobId: 102 }),
     ).rejects.toBeInstanceOf(RetryableError);
     expect(fixture.compute.created).toHaveLength(1);
+  });
+
+  it("claims at most one waiting job per shared-host request without deleting the host", async () => {
+    const fixture = createFixture(2, new SharedHostComputeProvider({
+      hostId: "pool-fsn1-1",
+      publicIpv4: "192.0.2.10",
+    }));
+    await fixture.controller.handleWorkflowJob(event);
+    await fixture.controller.handleWorkflowJob({ ...event, jobId: 102 });
+
+    const first = await fixture.controller.claimPoolRunner("192.0.2.10", "pool-fsn1-1");
+    const second = await fixture.controller.claimPoolRunner("192.0.2.10", "pool-fsn1-1");
+    const empty = await fixture.controller.claimPoolRunner("192.0.2.10", "pool-fsn1-1");
+
+    expect([first?.jobKey, second?.jobKey]).toEqual(["job-101", "job-102"]);
+    expect(empty).toBeNull();
+    expect(fixture.runners.created).toBe(2);
+    await fixture.controller.handleWorkflowJob({ ...event, action: "completed" });
+    expect(fixture.compute.deleted).toEqual([]);
+  });
+
+  it("does not expose shared-host work to a different host identity or source address", async () => {
+    const fixture = createFixture(2, new SharedHostComputeProvider({
+      hostId: "pool-fsn1-1",
+      publicIpv4: "192.0.2.10",
+    }));
+    await fixture.controller.handleWorkflowJob(event);
+    expect(await fixture.controller.claimPoolRunner("192.0.2.10", "pool-fsn1-2")).toBeNull();
+    expect(await fixture.controller.claimPoolRunner("198.51.100.8", "pool-fsn1-1")).toBeNull();
+    expect(fixture.runners.created).toBe(0);
+  });
+
+  it("enrolls an elastic pool host once and claims work only from its provider address", async () => {
+    const provider = new MemoryElasticPoolProvider();
+    const fixture = createFixture(2, provider);
+    await fixture.controller.handleWorkflowJob(event);
+
+    await expect(fixture.controller.identifyPoolHost("198.51.100.8")).rejects.toBeInstanceOf(TerminalError);
+    await expect(fixture.controller.identifyPoolHost("192.0.2.10")).resolves.toEqual({
+      hostId: "pool-server-1",
+    });
+    expect((await fixture.jobs.get("job-101"))?.bootstrapTokenHash).toBe("bootstrap-hash");
+
+    const claim = await fixture.controller.claimPoolRunner("192.0.2.10");
+    expect(claim?.jobKey).toBe("job-101");
+  });
+
+  it("releases an elastic pool host only after all referenced jobs are terminal", async () => {
+    const provider = new MemoryElasticPoolProvider();
+    const fixture = createFixture(2, provider);
+    await fixture.controller.handleWorkflowJob(event);
+    expect(await fixture.controller.releaseIdlePoolHost("192.0.2.10")).toBe(false);
+    await fixture.controller.handleWorkflowJob({ ...event, action: "completed" });
+    expect(await fixture.controller.releaseIdlePoolHost("192.0.2.10")).toBe(true);
+    expect(provider.released).toBe(1);
   });
 
   it("cleans expired jobs and provider-labeled orphans", async () => {
@@ -267,11 +323,15 @@ describe("provider-agnostic workflow_job trust policy", () => {
   });
 });
 
-function createFixture(maxRunners = 2) {
+function createFixture(maxRunners = 2, provider?: ComputeProvider) {
   const jobs = new MemoryJobStore();
   const clock = new MutableClock(1_000);
   const leases = new MemoryLeaseStore(clock);
-  const compute = new MemoryComputeProvider();
+  const memoryCompute = new MemoryComputeProvider();
+  const computePort = provider
+    ? new RecordingComputeProvider(provider, memoryCompute)
+    : memoryCompute;
+  const compute = memoryCompute;
   const runners = new MemoryRunnerControl();
   const telemetry: Telemetry = { emit: () => undefined };
   const controller = new Controller(
@@ -288,7 +348,7 @@ function createFixture(maxRunners = 2) {
     {
       jobs,
       leases,
-      compute,
+      compute: computePort,
       runners,
       bootstrapTokens: new StaticBootstrapBroker(),
       clock,
@@ -399,6 +459,51 @@ class MemoryComputeProvider implements ComputeProvider {
     this.deleted.push(resource.serverId);
   }
   async listExpired() { return this.expired.splice(0); }
+}
+
+class RecordingComputeProvider implements ComputeProvider {
+  constructor(
+    private readonly delegate: ComputeProvider,
+    private readonly recording: MemoryComputeProvider,
+  ) {}
+  get created() { return this.recording.created; }
+  get deleted() { return this.recording.deleted; }
+  get expired() { return this.recording.expired; }
+  async create(request: ComputeCreateRequest) {
+    this.recording.created.push(request);
+    return this.delegate.create(request);
+  }
+  async delete(resource: ComputeResource) {
+    await this.delegate.delete(resource);
+  }
+  async listExpired(now: number) {
+    return this.delegate.listExpired(now);
+  }
+  async releaseIdleHost(sourceIp: string) {
+    return this.delegate.releaseIdleHost ? this.delegate.releaseIdleHost(sourceIp) : false;
+  }
+}
+
+class MemoryElasticPoolProvider implements ComputeProvider {
+  released = 0;
+  async create(request: ComputeCreateRequest): Promise<ComputeResource> {
+    return {
+      provider: "hetzner-pool-job",
+      serverId: "pool-server-1",
+      firewallId: "pool-firewall-1",
+      primaryIpv4Id: "pool-ip-1",
+      publicIpv4: "192.0.2.10",
+      expiresAt: request.expiresAt,
+      jobKey: request.jobKey,
+    };
+  }
+  async delete() {}
+  async listExpired() { return []; }
+  async releaseIdleHost(sourceIp: string) {
+    if (sourceIp !== "192.0.2.10") return false;
+    this.released += 1;
+    return true;
+  }
 }
 
 class MemoryRunnerControl implements RunnerControl {

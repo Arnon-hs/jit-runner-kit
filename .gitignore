@@ -14,7 +14,9 @@ node_modules/
 .wrangler/
 .wrangler-dist/
 packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+packages/adapter-controller-cloudflare/.wrangler-dist-canary/
 examples/github-app-manifest.canary.json
+.wrangler-dist-canary/
 runner_ed25519
 runner_ed25519.pub
 .DS_Store

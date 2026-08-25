@@ -1,20 +1,20 @@
 # Deploy the Cloudflare controller
 
-Status: v0.2.0 controlled-canary package. The Worker compiles and the provider-agnostic lifecycle, trust, cryptography, configuration, and Hetzner adapter have local conformance coverage. Complete the live-cloud gates below before using it for production releases.
+Status: v0.2.0 controlled-canary package. The Worker compiles and the provider-agnostic lifecycle, trust, cryptography, configuration, GitHub repository/organization scopes, and Hetzner adapter have local conformance coverage. Complete the live-cloud gates below before using it for production releases.
 
 ## What this adapter owns
 
 ```text
 GitHub workflow_job webhook
   -> signature + allowlist + branch + labels + non-PR trust gate
-  -> private organization runner group restricted to exact trusted workflows
+  -> repository-scoped App, or private organization runner group
   -> Cloudflare Queue
   -> singleton SQLite Durable Object (job CAS + global leases)
-  -> Hetzner API (deny-inbound VM, no SSH)
-  -> one-time bootstrap exchange
-  -> GitHub App JIT configuration
-  -> one job
-  -> completed event cleanup
+  -> Hetzner API (at most one deny-inbound pool host, no SSH)
+  -> source-bound one-time host enrollment
+  -> GitHub App JIT configuration per claimed job
+  -> at most two disposable runner/DinD pairs
+  -> completed event job cleanup + bounded host idle release
 
 Durable Object alarm + Cron
   -> job TTL reconciliation
@@ -27,24 +27,26 @@ GitHub remains the workflow scheduler. Cloudflare becomes the JIT lifecycle cont
 
 - A Cloudflare account with Workers, Queues, Durable Objects, and Cron Triggers available.
 - A dedicated Hetzner Cloud project and read/write API token.
-- A GitHub organization containing the private repositories the controller may serve.
-- A dedicated organization runner group restricted to an exact list of trusted workflows.
-- A GitHub App installed only on those repositories and granted access to the runner group.
+- One or more private GitHub repositories owned by a user or organization.
+- A private GitHub App installed only on the repositories the controller may serve.
+- For optional organization scope, a dedicated organization runner group restricted to an exact list of trusted workflows.
 - Node.js 22 and npm.
 
-Create the GitHub App with:
+The default and least-privilege setup is repository scope. Create the GitHub App with:
 
 - Webhook event: **Workflow jobs** only.
-- Repository permissions: **Actions: read**, **Metadata: read**.
-- Organization permissions: **Self-hosted runners: read and write**.
+- Repository permissions: **Actions: read**, **Administration: read and write**, **Metadata: read**.
+- No organization permissions.
 - Webhook URL: `https://YOUR_CONTROLLER/webhooks/github`.
 - A random webhook secret.
 
-The repository includes `examples/github-app-manifest.json` as a reviewable configuration template. It is not submitted anywhere by the project and it does not implement GitHub's one-hour manifest-conversion handshake. Register the private App in your organization settings (or through a one-time manifest flow that you control), then store the generated ID and private key only as Worker secrets. See GitHub's [App manifest parameters](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) and [self-hosted runner permission requirements](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps).
+The repository includes `examples/github-app-repository-manifest.json` as the default reviewable template. `examples/github-app-manifest.json` is the organization-scope variant and replaces repository **Administration** with organization **Self-hosted runners: read and write**. Neither file is submitted anywhere by the project and neither implements GitHub's one-hour manifest-conversion handshake. Register the private App under the account that owns the served repositories, install it on selected repositories only, then store the generated ID and private key only as Worker secrets. See GitHub's [App manifest parameters](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) and [self-hosted runner permission requirements](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps).
 
 Do not enable the controller for public-fork or pull-request jobs. This implementation rejects every queued job with a non-empty `pull_requests` array.
 
-Create a dedicated organization runner group with public-repository access disabled, workflow access enabled, and only explicitly trusted workflow paths selected. Pin every selected path to `refs/heads/main` (or another protected branch) or a full commit SHA. The controller verifies that the live group policy exactly matches `TRUSTED_WORKFLOWS` before it creates compute. Personal-account repositories are intentionally unsupported in this secure serverless mode; use the GitHub control-job adapter for them.
+Repository scope supports personal-account and organization repositories. It verifies the signed repository identity, the installation-scoped repository, workflow event, source repository, branch, branch- or SHA-pinned workflow path, and exactly one matching queued job before compute creation and again before JIT issuance. Keep direct write access to trusted branches restricted.
+
+For organization scope, additionally create a dedicated runner group with public-repository access disabled, workflow access enabled, and only explicitly trusted workflow paths selected. The controller verifies that the live group policy exactly matches `TRUSTED_WORKFLOWS` before it creates compute and again before JIT issuance.
 
 ## Configure Cloudflare
 
@@ -55,7 +57,7 @@ The repository ships inert deployment templates. Copy them to ignored canary fil
 ```bash
 cp packages/adapter-controller-cloudflare/wrangler.jsonc \
   packages/adapter-controller-cloudflare/wrangler.canary.jsonc
-cp examples/github-app-manifest.json examples/github-app-manifest.canary.json
+cp examples/github-app-repository-manifest.json examples/github-app-manifest.canary.json
 ```
 
 Edit both copies, then run the offline fail-closed preflight:
@@ -70,7 +72,7 @@ npx wrangler deploy --dry-run \
   --outdir .wrangler-dist-canary
 ```
 
-The preflight verifies the SQLite Durable Object export, Queue/DLQ/Cron bindings, organization and repository relationship, exact branch- or SHA-pinned workflow paths, numeric limits, HTTPS origin, and minimum GitHub App permissions. It makes no provider calls and reads no secrets. The committed template itself is checked in CI with `npm run check:cloudflare-config`.
+The preflight verifies the SQLite Durable Object export, Queue/DLQ/Cron/rate-limit bindings, scope-specific GitHub App permissions, repository ownership where applicable, trusted events, exact branch- or SHA-pinned workflow paths, numeric limits, and HTTPS origin. It makes no provider calls and reads no secrets. The committed template itself is checked in CI with `npm run check:cloudflare-config`.
 
 The Wrangler template uses Cloudflare's [declarative `exports` lifecycle](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/) for the new SQLite Durable Object namespace. Do not add the legacy `migrations` array to a new deployment.
 
@@ -88,10 +90,17 @@ Edit the ignored `packages/adapter-controller-cloudflare/wrangler.canary.jsonc`:
 
 - set `ALLOWED_REPOSITORIES` to a comma-separated `owner/repository` allowlist;
 - set `TRUSTED_BRANCHES` to explicit branch names;
-- set `GITHUB_ORGANIZATION` and the dedicated `RUNNER_GROUP_ID`;
-- set `TRUSTED_WORKFLOWS` to the exact comma-separated selected-workflow list from the runner group;
+- keep `RUNNER_SCOPE=repository` for the least-privilege default, or use `organization` only with the stronger runner-group boundary;
+- in repository scope, set `RUNNER_GROUP_ID` to the repository JIT endpoint's runner-group ID and leave `GITHUB_ORGANIZATION` informational;
+- in organization scope, set `GITHUB_ORGANIZATION` and the dedicated `RUNNER_GROUP_ID`;
+- set `TRUSTED_EVENTS` to trusted non-PR events such as `push,workflow_dispatch`;
+- set `TRUSTED_WORKFLOWS` to exact branch- or SHA-pinned workflow paths; in organization scope these must also exactly match the runner group's selected-workflow list;
 - keep `RUN_LABEL_PREFIX` non-empty and route jobs with `jit-run-${{ github.run_id }}` as defense in depth;
 - keep `MAX_RUNNERS` at `1` for the first canary, then at most `2` initially;
+- set `COMPUTE_MODE=hetzner-pool` and a unique, stable `POOL_ID` for this deployment;
+- set `POOL_IDLE_SECONDS=600` (accepted range 300-3600);
+- set `POOL_AGENT_URL` to the pool agent at an immutable Git commit and `POOL_AGENT_SHA256` to its exact SHA-256;
+- set `POOL_RUNNER_IMAGE` and `POOL_DIND_IMAGE` to full registry references pinned with `@sha256:` digests;
 - keep `PROVISIONING_TIMEOUT_SECONDS` long enough for normal API calls (the default is 300); stale attempts are claimed again after this window;
 - set `PUBLIC_BASE_URL` to the final HTTPS Worker or custom-domain origin;
 - select a Hetzner server type, location, image, architecture, and TTL.
@@ -103,9 +112,11 @@ npx wrangler secret put GITHUB_WEBHOOK_SECRET --config packages/adapter-controll
 npx wrangler secret put GITHUB_APP_ID --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
 npx wrangler secret put GITHUB_APP_PRIVATE_KEY --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
 npx wrangler secret put HCLOUD_TOKEN --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+npx wrangler secret put POOL_ENROLLMENT_TOKEN --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
+npx wrangler secret put POOL_HOST_TOKEN --config packages/adapter-controller-cloudflare/wrangler.canary.jsonc
 ```
 
-The GitHub App private key may use GitHub's PKCS#1 PEM or PKCS#8 PEM format. Never put it in `vars`, `.dev.vars`, shell history, source control, logs, Durable Object storage, or Queue messages.
+Generate both pool tokens as independent 32-byte base64url values without padding (43 characters). The enrollment token enters cloud-init only to identify the newly created provider host; the host token is returned once after controller/IP validation and is never mounted into workload containers. The GitHub App private key may use GitHub's PKCS#1 PEM or PKCS#8 PEM format. Never put any secret in `vars`, `.dev.vars`, shell history, source control, logs, Durable Object storage, or Queue messages.
 
 Build locally, then deploy:
 
@@ -132,38 +143,42 @@ jobs:
       - run: ./your-ci-command
 ```
 
-The webhook payload labels become the JIT runner labels. The run-scoped label reduces accidental cross-routing, but GitHub's JIT API does not bind a runner to a job ID and labels are visible to repository workflows. The security boundary is the private organization runner group restricted to the exact trusted workflow definitions. Every queued job still receives a separate VM, and the controller rejects both queued and completed events that do not carry the expected run-scoped label.
+The webhook payload labels become the JIT runner labels. Labels are visible to repository workflows and GitHub's JIT API does not accept a job ID, so labels alone are not a security boundary. The adapter re-reads the run and its latest jobs from GitHub and requires exactly one queued job matching the webhook job ID, stable trigger label, and run-scoped label. Repository scope relies on the selected-repository App installation plus the exact trusted run policy; organization scope additionally verifies the workflow-restricted runner group. In `hetzner-pool` mode every accepted job receives a separate runner/DinD pair on the single active pool host.
 
 ## Security properties
 
 - `X-Hub-Signature-256` is verified with HMAC-SHA256 before JSON parsing or queueing.
 - The provider-agnostic core enforces repository, branch, trigger-label, run-scoped-label, and no-PR policy for both queued and completed events.
-- Before provisioning, the GitHub adapter verifies that the repository belongs to the configured organization and the dedicated runner group is private and restricted to exactly `TRUSTED_WORKFLOWS`.
-- The runner-group policy is verified again immediately before JIT configuration is generated, so policy drift during VM startup fails closed.
+- Before provisioning, the GitHub adapter verifies the signed repository identity, trusted event and source repository, branch, workflow path/ref, and an unambiguous matching queued job.
+- The trusted run is verified again immediately before JIT configuration is generated. Organization scope also verifies its private exact-workflow runner-group policy at both points.
+- Public endpoints are rate-limited before expensive work. Webhook bodies must be JSON and are capped at 1 MiB; malformed bootstrap paths and authorization tokens are rejected before Durable Object dispatch.
 - The Queue carries identifiers and lifecycle state, never credentials or JIT configuration.
 - The Durable Object stores only a SHA-256 digest of the bootstrap token.
 - Bootstrap also requires the request's observed public IPv4 to equal the created VM's IPv4.
 - JIT configuration is generated only after successful bootstrap verification and an atomic state claim, returned once with `Cache-Control: no-store`, and never written to durable state.
-- The VM has no SSH key and a firewall with no inbound rules. It needs outbound HTTPS for Cloudflare, GitHub, Ubuntu, and workload dependencies.
+- The pool host has no SSH key and a firewall with no inbound rules. It needs outbound HTTPS for Cloudflare, GitHub, Ubuntu, registries, and workload dependencies.
+- Pool discovery and cleanup use an explicit `pool_id` label. A retryable create response performs bounded label recovery and blocks a second create while the first result is ambiguous.
+- One Durable Object operation gate serializes queue, bootstrap, claim, release, alarm, and provider mutations.
 - GitHub installation tokens are minted per operation and scoped to the webhook repository ID.
 
-Cloud-init necessarily receives the one-time bootstrap token as Hetzner `user_data`. It is not a GitHub credential, is rejected synchronously after the job TTL, is deleted from `/run` before runner startup, and cannot be reused after the atomic bootstrap claim.
+Cloud-init receives only the pool enrollment token plus immutable public artifact identities. It receives no GitHub credential, JIT configuration, host token, or application secret. The controller binds enrollment to the active provider host IPv4 and generation. Runner containers receive only their root-readable one-job JIT file and never the pool credentials.
 
 ## Required live-cloud gates
 
 Run these in a dedicated Hetzner project and a non-production GitHub repository:
 
-1. Valid signed queued event provisions exactly one VM and one runner.
-2. Duplicate webhook delivery does not provision a second VM.
-3. Wrong organization, repository, branch, workflow-group policy, missing static/run-scoped label, PR association, signature, token, and source IP create no compute.
-4. Successful workload removes the runner, server, Primary IPv4, and firewall.
-5. Intentionally failed workload performs the same cleanup.
-6. Cancelled workflow is cleaned by completed delivery or TTL reconciliation.
-7. A forced retry reaches the Queue retry path; an exhausted synthetic task reaches the DLQ without leaking secrets.
-8. A deliberately orphaned expired labeled resource is removed by Cron/provider reconciliation.
-9. The existing GitHub control-job fallback still passes.
-10. `bin/jit-runner inventory --require-empty` reports zero managed Hetzner resources.
-11. A workflow outside the runner group's selected list cannot acquire a runner even if it copies all runner labels.
+1. Valid signed queued event provisions exactly one pool VM and one runner container.
+2. Duplicate webhook delivery, concurrent queue delivery, and ambiguous provider response do not provision a second VM.
+3. Wrong repository, event, source repository, branch, workflow path/ref, organization-scope group policy, ambiguous job set, missing static/run-scoped label, PR association, signature, token, and source IP create no compute.
+4. Two concurrent accepted runs use one VM and no more than two isolated runner/DinD pairs; no per-job server, IPv4, firewall, or SSH key is created.
+5. Successful workload removes the JIT record and job containers; the idle window then removes the host, Primary IPv4, and firewall.
+6. Intentionally failed workload performs the same job and idle cleanup.
+7. Cancelled workflow is cleaned by completed delivery or TTL reconciliation, including cancellation before host enrollment.
+8. A forced retry reaches the Queue retry path; an exhausted synthetic task reaches the DLQ without leaking secrets.
+9. A deliberately orphaned expired labeled resource is removed by Cron/provider reconciliation.
+10. The existing GitHub control-job fallback still passes without being invoked by the new workflow.
+11. After the 10-15 minute idle observation, `bin/jit-runner inventory --require-empty` reports zero `ephemeral_*` and `pool_*` resources.
+12. A workflow outside `TRUSTED_WORKFLOWS` cannot acquire a runner even if it copies all runner labels; organization scope also proves the same through the runner-group policy.
 
 Until all gates pass, keep production workflows on the GitHub control-job adapter.
 

@@ -5,6 +5,12 @@
   "poll_seconds": 30,
   "max_runners": 1,
   "trigger_label": "jit-runner",
+  "run_label_prefix": "jit-run-",
+  "trusted_events": ["push", "workflow_dispatch"],
+  "trusted_branches": ["main"],
+  "trusted_workflows": [
+    "your-owner/your-private-repository/.github/workflows/ci.yml@refs/heads/main"
+  ],
   "server_type": "cx33",
   "location": "fsn1",
   "image": "ubuntu-24.04",
@@ -12,4 +18,3 @@
   "ttl_minutes": 180,
   "state_root": "/var/lib/jit-runner-controller"
 }
-

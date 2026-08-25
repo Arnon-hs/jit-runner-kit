@@ -12,9 +12,9 @@ usage() {
 Usage:
   jit-runner-controller --config PATH [--once] [--dry-run]
 
-The controller polls configured repositories for queued jobs containing the
-trigger label, creates one ephemeral runner per job, and destroys the VM after
-the GitHub runner deregisters or reaches its TTL.
+The controller polls configured repositories and provisions only jobs whose
+event, source repository, branch, pinned workflow, static label, and run-scoped
+label match the deny-by-default policy in the configuration file.
 
 Environment:
   JIT_RUNNER_GITHUB_TOKEN   GitHub Actions read and Administration write
@@ -101,15 +101,47 @@ active_runner_count() {
 queued_jobs() {
   local repository="$1"
   local trigger_label="$2"
-  local run_status runs run_id jobs
+  local run_label_prefix="$3"
+  local trusted_events="$4"
+  local trusted_branches="$5"
+  local trusted_workflows="$6"
+  local run_status runs run_id jobs run_label eligible_count reported_count returned_count
   for run_status in queued in_progress; do
     runs="$(github_request GET "repos/${repository}/actions/runs?status=${run_status}&per_page=20")"
     while IFS= read -r run_id; do
       [[ -n "$run_id" ]] || continue
       jobs="$(github_request GET "repos/${repository}/actions/runs/${run_id}/jobs?filter=latest&per_page=100")"
-      jq -r --arg label "$trigger_label" \
-        '.jobs[] | select(.status == "queued") | select(.labels | index($label)) | .id' <<<"$jobs"
-    done < <(jq -r '.workflow_runs[].id' <<<"$runs")
+      reported_count="$(jq -r '.total_count // -1' <<<"$jobs")"
+      returned_count="$(jq -r '.jobs | length' <<<"$jobs")"
+      if [[ ! "$reported_count" =~ ^[0-9]+$ || "$reported_count" -gt 100 || "$reported_count" != "$returned_count" ]]; then
+        printf 'warning: refusing run %s in %s because its job inventory is incomplete or invalid\n' \
+          "$run_id" "$repository" >&2
+        continue
+      fi
+      run_label="${run_label_prefix}${run_id}"
+      eligible_count="$(jq -r --arg trigger "$trigger_label" --arg run "$run_label" \
+        '[.jobs[] | select(.status == "queued") | select(.labels | index($trigger)) | select(.labels | index($run))] | length' <<<"$jobs")"
+      if [[ "$eligible_count" != 1 ]]; then
+        if [[ "$eligible_count" != 0 ]]; then
+          printf 'warning: refusing run %s in %s because %s eligible JIT jobs share its labels\n' \
+            "$run_id" "$repository" "$eligible_count" >&2
+        fi
+        continue
+      fi
+      jq -r --arg trigger "$trigger_label" --arg run "$run_label" \
+        '.jobs[] | select(.status == "queued") | select(.labels | index($trigger)) | select(.labels | index($run)) | [.id, $run] | @tsv' <<<"$jobs"
+    done < <(jq -r \
+      --arg repository "$repository" \
+      --argjson events "$trusted_events" \
+      --argjson branches "$trusted_branches" \
+      --argjson workflows "$trusted_workflows" '
+        .workflow_runs[]
+        | select(.event as $value | $events | index($value))
+        | select(.head_repository.full_name == $repository)
+        | select(.head_branch as $value | $branches | index($value))
+        | select((.head_repository.full_name + "/" + .path + "@refs/heads/" + .head_branch) as $value | $workflows | index($value))
+        | .id
+      ' <<<"$runs")
   done
 }
 
@@ -173,11 +205,12 @@ provision_for_job() {
   local repository="$2"
   local job_id="$3"
   local trigger_label="$4"
-  local server_type="$5"
-  local location="$6"
-  local image="$7"
-  local architecture="$8"
-  local ttl_minutes="$9"
+  local run_label="$5"
+  local server_type="$6"
+  local location="$7"
+  local image="$8"
+  local architecture="$9"
+  local ttl_minutes="${10}"
   local runner_id
 
   write_status "$job_dir" provisioning "$repository" "$job_id"
@@ -190,7 +223,7 @@ provision_for_job() {
     --image "$image" \
     --architecture "$architecture" \
     --ttl-minutes "$ttl_minutes" \
-    --labels "$trigger_label" >"${job_dir}/provision.log" 2>&1; then
+    --labels "${trigger_label},${run_label}" >"${job_dir}/provision.log" 2>&1; then
     write_status "$job_dir" failed "$repository" "$job_id" "" "provisioning failed; inspect provision.log"
     return 1
   fi
@@ -207,8 +240,9 @@ main() {
   local config=""
   local once=false
   local dry_run=false
-  local repositories poll_seconds max_runners trigger_label server_type location image architecture ttl_minutes state_root
-  local repository job_id job_key job_dir active worker_pid
+  local repositories poll_seconds max_runners trigger_label run_label_prefix trusted_events trusted_branches trusted_workflows
+  local server_type location image architecture ttl_minutes state_root
+  local repository job_id run_label job_key job_dir active worker_pid
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -237,6 +271,10 @@ main() {
   poll_seconds="$(jq -r '.poll_seconds // 30' "$config")"
   max_runners="$(jq -r '.max_runners // 1' "$config")"
   trigger_label="$(jq -r '.trigger_label // "jit-runner"' "$config")"
+  run_label_prefix="$(jq -r '.run_label_prefix // "jit-run-"' "$config")"
+  trusted_events="$(jq -c '.trusted_events // []' "$config")"
+  trusted_branches="$(jq -c '.trusted_branches // []' "$config")"
+  trusted_workflows="$(jq -c '.trusted_workflows // []' "$config")"
   server_type="$(jq -r '.server_type // "cx33"' "$config")"
   location="$(jq -r '.location // "fsn1"' "$config")"
   image="$(jq -r '.image // "ubuntu-24.04"' "$config")"
@@ -246,6 +284,14 @@ main() {
   [[ "$poll_seconds" =~ ^[1-9][0-9]*$ ]] || die "poll_seconds must be a positive integer"
   [[ "$max_runners" =~ ^[1-9][0-9]*$ ]] || die "max_runners must be a positive integer"
   [[ "$ttl_minutes" =~ ^[1-9][0-9]*$ ]] || die "ttl_minutes must be a positive integer"
+  [[ "$trigger_label" =~ ^[A-Za-z0-9._-]+$ ]] || die "trigger_label is invalid"
+  [[ "$run_label_prefix" =~ ^[A-Za-z0-9._-]+$ ]] || die "run_label_prefix is invalid"
+  jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0 and (contains("pull_request") | not))' <<<"$trusted_events" >/dev/null \
+    || die "trusted_events must be a non-empty array and must not include pull request events"
+  jq -e 'type == "array" and length > 0 and all(.[]; test("^[A-Za-z0-9._/-]+$"))' <<<"$trusted_branches" >/dev/null \
+    || die "trusted_branches must be a non-empty array of branch names"
+  jq -e 'type == "array" and length > 0 and all(.[]; test("^[^/]+/[^/]+/\\.github/workflows/[^@/]+\\.ya?ml@refs/heads/[A-Za-z0-9._/-]+$"))' <<<"$trusted_workflows" >/dev/null \
+    || die "trusted_workflows must contain full branch-pinned workflow paths"
 
   mkdir -p "${state_root}/jobs"
   state_root="$(cd "$state_root" && pwd)"
@@ -257,8 +303,9 @@ main() {
     active="$(active_runner_count "$state_root")"
     while IFS= read -r repository; do
       [[ -n "$repository" ]] || continue
-      while IFS= read -r job_id; do
+      while IFS=$'\t' read -r job_id run_label; do
         [[ "$job_id" =~ ^[0-9]+$ ]] || continue
+        [[ "$run_label" == "${run_label_prefix}"* ]] || continue
         job_key="$(printf '%s-%s' "${repository//\//-}" "$job_id" | tr '[:upper:]' '[:lower:]')"
         job_dir="${state_root}/jobs/${job_key}"
         if [[ -e "$job_dir" ]]; then
@@ -268,17 +315,19 @@ main() {
           break
         fi
         if [[ "$dry_run" == true ]]; then
-          printf 'would-provision repository=%s job=%s label=%s\n' "$repository" "$job_id" "$trigger_label"
+          printf 'would-provision repository=%s job=%s labels=%s,%s\n' \
+            "$repository" "$job_id" "$trigger_label" "$run_label"
           active=$((active + 1))
           continue
         fi
         mkdir "$job_dir"
-        provision_for_job "$job_dir" "$repository" "$job_id" "$trigger_label" \
+        provision_for_job "$job_dir" "$repository" "$job_id" "$trigger_label" "$run_label" \
           "$server_type" "$location" "$image" "$architecture" "$ttl_minutes" &
         worker_pid="$!"
         printf '%s\n' "$worker_pid" >"${job_dir}/worker.pid"
         active=$((active + 1))
-      done < <(queued_jobs "$repository" "$trigger_label")
+      done < <(queued_jobs "$repository" "$trigger_label" "$run_label_prefix" \
+        "$trusted_events" "$trusted_branches" "$trusted_workflows")
     done <<<"$repositories"
 
     if [[ "$once" == true ]]; then

@@ -41,8 +41,11 @@ resource "hcloud_server" "runner" {
   firewall_ids = [
     hcloud_firewall.runner.id,
   ]
-  labels    = local.labels
-  user_data = file("${path.module}/cloud-init.yaml")
+  labels = local.labels
+  user_data = templatefile("${path.module}/cloud-init.yaml", {
+    ssh_host_private_key_b64 = base64encode(var.ssh_host_private_key)
+    ssh_host_public_key_b64  = base64encode(var.ssh_host_public_key)
+  })
 
   public_net {
     ipv4_enabled = true

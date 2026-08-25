@@ -99,6 +99,8 @@ export interface ComputeProvider {
   create(request: ComputeCreateRequest): Promise<ComputeResource>;
   delete(resource: ComputeResource): Promise<void>;
   listExpired(now: number): Promise<ComputeResource[]>;
+  /** Delete shared capacity only after the controller proves it is idle. */
+  releaseIdleHost?(sourceIp: string): Promise<boolean>;
 }
 
 export interface RunnerControl {

@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="${ROOT_DIR}/bin/jit-runner"
 CONTROLLER="${ROOT_DIR}/bin/jit-runner-controller"
+POOL_AGENT="${ROOT_DIR}/bin/jit-runner-pool-agent"
 TEST_TMP="$(mktemp -d)"
 trap 'rm -rf "$TEST_TMP"' EXIT
 
@@ -15,6 +16,10 @@ help_output="$($CLI --help)"
 
 controller_help="$($CONTROLLER --help)"
 [[ "$controller_help" == *"jit-runner-controller --config"* ]]
+
+pool_help="$($POOL_AGENT --help)"
+[[ "$pool_help" == *"jit-runner-pool-agent"* ]]
+[[ "$pool_help" == *"Docker-in-Docker"* ]]
 
 set +e
 invalid_output="$($CLI provision --repository 'not a repository' 2>&1)"
@@ -42,7 +47,11 @@ case "$url" in
     printf '{"encoded_jit_config":"test-jit-config","runner":{"id":888}}\n201'
     ;;
   */servers)
-    printf '{"servers":[{"id":101,"labels":{"expires_at":"1"}},{"id":102,"labels":{"expires_at":"4102444800"}},{"id":103,"labels":{}}]}'
+    if [[ "$*" == *"managed_by=jit-runner-kit-pool"* ]]; then
+      printf '{"servers":[]}'
+    else
+      printf '{"servers":[{"id":101,"labels":{"expires_at":"1"}},{"id":102,"labels":{"expires_at":"4102444800"}},{"id":103,"labels":{}}]}'
+    fi
     ;;
   */firewalls) printf '{"firewalls":[]}' ;;
   */primary_ips) printf '{"primary_ips":[]}' ;;
@@ -50,13 +59,13 @@ case "$url" in
   */repos/owner/repository/actions/runners/[0-9]*) printf '204' ;;
   */servers/[0-9]*|*/firewalls/[0-9]*|*/primary_ips/[0-9]*|*/ssh_keys/[0-9]*) ;;
   */actions/runs\?status=queued\&per_page=20)
-    printf '{"workflow_runs":[{"id":55}]}'
+    printf '{"workflow_runs":[{"id":55,"event":"push","head_branch":"main","path":".github/workflows/ci.yml","head_repository":{"full_name":"owner/repository"}},{"id":56,"event":"pull_request","head_branch":"main","path":".github/workflows/ci.yml","head_repository":{"full_name":"fork/repository"}}]}'
     ;;
   */actions/runs\?status=in_progress\&per_page=20)
     printf '{"workflow_runs":[]}'
     ;;
   */actions/runs/55/jobs\?filter=latest\&per_page=100)
-    printf '{"jobs":[{"id":999,"status":"queued","labels":["self-hosted","linux","x64","jit-runner"]}]}'
+    printf '{"total_count":1,"jobs":[{"id":999,"status":"queued","labels":["self-hosted","linux","x64","jit-runner","jit-run-55"]}]}'
     ;;
   *) printf 'unexpected mock URL: %s\n' "$url" >&2; exit 1 ;;
 esac
@@ -106,12 +115,13 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$TEST_TMP/bin/sleep"
 chmod +x "$TEST_TMP/bin/sleep"
 
 sweep_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" sweep --dry-run)"
-[[ "$sweep_output" == "would-delete servers/101" ]]
+[[ "$sweep_output" == "would-delete manager=jit-runner-kit servers/101" ]]
 [[ "$sweep_output" != *"102"* ]]
 [[ "$sweep_output" != *"103"* ]]
 
 inventory_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" inventory)"
-[[ "$inventory_output" == *$'servers=3\n'* ]]
+[[ "$inventory_output" == *$'ephemeral_servers=3\n'* ]]
+[[ "$inventory_output" == *$'pool_servers=0\n'* ]]
 [[ "$inventory_output" == *$'total=3'* ]]
 set +e
 PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" inventory --require-empty >/dev/null 2>&1
@@ -145,16 +155,41 @@ set -e
 grep -q -- '-var=location=fsn1' "$TEST_TMP/tofu.log"
 grep -q -- '-var=location=nbg1' "$TEST_TMP/tofu.log"
 grep -q '/repos/owner/repository/actions/runners/888$' "$MOCK_CURL_LOG"
+if grep -q 'StrictHostKeyChecking=no\|UserKnownHostsFile=/dev/null' "$CLI"; then
+  printf 'credential-bearing SSH must authenticate the ephemeral host key\n' >&2
+  exit 1
+fi
+grep -q 'StrictHostKeyChecking=yes' "$CLI"
 
 cat >"$TEST_TMP/controller.json" <<EOF
 {
   "repositories": ["owner/repository"],
+  "trusted_events": ["push", "workflow_dispatch"],
+  "trusted_branches": ["main"],
+  "trusted_workflows": ["owner/repository/.github/workflows/ci.yml@refs/heads/main"],
   "state_root": "$TEST_TMP/controller-state"
 }
 EOF
 controller_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' JIT_RUNNER_GITHUB_TOKEN=test \
   "$CONTROLLER" --config "$TEST_TMP/controller.json" --once --dry-run)"
-[[ "$controller_output" == "would-provision repository=owner/repository job=999 label=jit-runner" ]]
+[[ "$controller_output" == "would-provision repository=owner/repository job=999 labels=jit-runner,jit-run-55" ]]
+
+cat >"$TEST_TMP/controller-unsafe.json" <<EOF
+{
+  "repositories": ["owner/repository"],
+  "trusted_events": ["pull_request_review"],
+  "trusted_branches": ["main"],
+  "trusted_workflows": ["owner/repository/.github/workflows/ci.yml@refs/heads/main"],
+  "state_root": "$TEST_TMP/controller-unsafe-state"
+}
+EOF
+set +e
+unsafe_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' JIT_RUNNER_GITHUB_TOKEN=test \
+  "$CONTROLLER" --config "$TEST_TMP/controller-unsafe.json" --once --dry-run 2>&1)"
+unsafe_status=$?
+set -e
+[[ $unsafe_status -ne 0 ]]
+[[ "$unsafe_output" == *"must not include pull request events"* ]]
 
 if grep -RniE 'atlasrepo|reposearchengine' \
   --exclude-dir=.git \

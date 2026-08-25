@@ -3,14 +3,21 @@
 JIT Runner Kit separates scheduling from execution in every operating mode:
 
 - GitHub Actions owns the workflow queue and assigns a queued job to a matching runner.
-- In the recommended current mode, short GitHub-hosted provision and cleanup jobs are the control plane. The heavy workload runs only on the ephemeral runner.
+- In serverless mode, Cloudflare receives the signed event and owns provisioning, reconciliation, and cleanup. The workflow has no GitHub-hosted control jobs.
+- In fallback mode, short GitHub-hosted provision and cleanup jobs are the control plane. The heavy workload runs only on the ephemeral runner.
 - `jit-runner-controller` remains a compatibility control plane. It polls allowlisted repositories, requests a one-job JIT configuration, provisions the VM, observes completion, and destroys the resources.
 - Hetzner runs the untrusted build and deployment commands inside an ephemeral VM.
 - Your application platform, such as Zeabur, remains the deployment target. It is not the runner controller.
 
-In GitHub control-job mode, the provision job runs before the dynamically labeled workload and cleanup runs with `if: always()`. Neither control job checks out application code or runs builds, tests, or deployment commands. In polling mode, the controller must run outside the workflow it serves; no permanent controller host is needed in GitHub control-job mode.
+In GitHub control-job mode, the provision job runs before the dynamically labeled workload and cleanup runs with `if: always()`. Neither control job checks out application code or runs builds, tests, or deployment commands. In polling mode, the controller must run outside the workflow it serves. Serverless and GitHub control-job modes need neither a permanent controller VPS nor a Mac mini.
 
-## Run jobs concurrently
+## Run jobs concurrently at minimum provider cost
+
+The recommended Cloudflare `hetzner-pool` mode uses one scale-to-zero host per explicit `POOL_ID`. `MAX_RUNNERS=2` starts at most two disposable runner containers. Every runner has a dedicated network, root-only JIT file, and privileged Docker-in-Docker sidecar; runner containers never receive the host/controller credentials or the host Docker socket. Jobs share the VM kernel and therefore must come only from trusted branches.
+
+When the controller has no active job and the agent has no child runner for `POOL_IDLE_SECONDS` (600 recommended), the host requests its own release. Cloudflare rechecks controller state before Hetzner deletion. Cron and provider expiry labels remain independent backstops. The steady idle target is zero servers, firewalls, Primary IPv4s, and SSH keys.
+
+The compatibility polling controller has a different cost model:
 
 `max_runners` is the polling controller's global concurrency limit:
 
@@ -28,18 +35,19 @@ With `max_runners: 2`, two queued jobs can run at the same time on two separate 
 
 This model preserves the main security property: one VM executes one job and is then destroyed. It also avoids Docker socket, workspace, cache, CPU, and memory collisions between jobs.
 
-Running several runner processes or containers on one persistent server is possible with GitHub's self-hosted runner software, but JIT Runner Kit intentionally does not implement that mode. Those jobs share a kernel and host resources, cleanup is harder to prove, and one privileged build can affect another. Use separate ephemeral VMs for deployment and secret-bearing jobs.
+Do not run multiple runner processes directly on one persistent host. The pool adapter supplies disposable container/DinD pairs, enforces a hard maximum of four (two recommended), and deletes the entire capacity unit after idle. Use the one-VM-per-job compatibility adapter when a workload requires a stronger VM boundary.
 
 Choose a conservative limit:
 
 | Controller host | Suggested starting point | Why |
 | --- | ---: | --- |
+| Cloudflare first canary | `1` | Simplest success/failure analysis. |
+| Cloudflare concurrent canary and initial production | `2` | One CX33, two disposable runner/DinD pairs. |
 | Compatibility polling controller | `2` | The controller does little work; the limit mainly bounds cloud spend. |
-| First production pilot | `1` | Simplest failure analysis and cost observation. |
 
 Concurrency shortens wall-clock time. It does not make each VM cheaper, and the cloud provider may apply a minimum billable interval to every VM and attached resource.
 
-GitHub `concurrency` groups are repository-local, so identical groups do not enforce a global limit across several repositories. Until a serverless lease adapter is available, coordinate cross-repository dispatches operationally or use the polling controller's `max_runners`. Do not implement the cap by placing several secret-bearing jobs on one VM.
+GitHub `concurrency` groups are repository-local, so identical groups do not enforce a global limit across several repositories. The Cloudflare adapter's singleton Durable Object lease store and serialized provider operations enforce `MAX_RUNNERS` globally and one host per `POOL_ID`. The host agent enforces the same container cap locally.
 
 ## Keep the compatibility controller running
 
@@ -104,11 +112,14 @@ For every successful and failed canary, verify:
 - the job ran on a runner whose name starts with `jit-`;
 - the runner registration disappeared after one job;
 - the job state reached `completed` or an explicit terminal failure;
-- no matching Hetzner VM, Primary IPv4, firewall, or SSH key remains;
+- during concurrent load, no more than one matching Hetzner VM/firewall/Primary IPv4 and two runner/DinD pairs exist;
+- after the idle window, no matching Hetzner VM, Primary IPv4, firewall, or SSH key remains;
 - the TTL sweeper is able to find and remove deliberately stale test resources;
-- `jit-runner inventory --require-empty` reports zero managed resources after cleanup;
+- `jit-runner inventory --require-empty` reports zero `ephemeral_*` and `pool_*` resources after cleanup;
 - deployment verification checks the exact release commit rather than only an HTTP 200 response.
 
 The repository's manual CI workflow accepts `workload-mode=fail` to exercise cleanup after an intentionally failed workload. For a cancellation canary, use a short `ttl-minutes` value and a non-zero `hold-seconds` value, cancel only after the hold step has started, then run the independent TTL sweeper after expiry and finish with `jit-runner inventory --require-empty`. Run these canaries in a dedicated cloud project with no unrelated resources.
 
 The selected control-plane adapter is the source of provisioning decisions, GitHub is the source of queued-job state, and the cloud provider is the source of resource existence. Healthy operation requires all three views to agree. See [Serverless controller architecture](serverless-controller-architecture.md) for the accepted provider-agnostic event-driven design.
+
+For release workflows, use the exact-SHA and deployment verification checklist in [Release control contract](release-control-contract.md).

@@ -27,6 +27,15 @@ export interface BootstrapResult {
   encodedJitConfig: string;
 }
 
+export interface PoolClaimResult extends BootstrapResult {
+  jobKey: string;
+  expiresAt: number;
+}
+
+export interface PoolEnrollmentResult {
+  hostId: string;
+}
+
 export class Controller {
   constructor(
     private readonly config: ControllerConfig,
@@ -61,6 +70,73 @@ export class Controller {
       throw new TerminalError("bootstrap token is invalid or already consumed");
     }
 
+    const result = await this.startRunner(record);
+    if (!result) throw new TerminalError("bootstrap token is invalid or already consumed");
+    return result;
+  }
+
+  async identifyPoolHost(sourceIp: string): Promise<PoolEnrollmentResult> {
+    const waiting = (await this.ports.jobs.listActive())
+      .filter((record) =>
+        record.state === "awaiting-bootstrap"
+        && record.compute?.provider === "hetzner-pool-job"
+        && record.compute.publicIpv4 === sourceIp,
+      )
+      .sort((left, right) => left.createdAt - right.createdAt || left.key.localeCompare(right.key));
+    const record = waiting[0];
+    if (!record) throw new TerminalError("pool enrollment source does not match an active host");
+    return { hostId: record.compute!.serverId };
+  }
+
+  async claimPoolRunner(
+    sourceIp: string,
+    expectedHostId?: string,
+  ): Promise<PoolClaimResult | null> {
+    const waiting = (await this.ports.jobs.listActive())
+      .filter((record) =>
+        record.state === "awaiting-bootstrap"
+        && ["shared-host", "hetzner-pool-job"].includes(record.compute?.provider ?? "")
+        && (!expectedHostId || record.compute?.serverId === expectedHostId)
+        && record.compute?.publicIpv4 === sourceIp,
+      )
+      .sort((left, right) => left.createdAt - right.createdAt || left.key.localeCompare(right.key));
+
+    for (const record of waiting) {
+      if (record.expiresAt <= this.ports.clock.now()) {
+        try {
+          await this.cleanup(record, "pool-claim-ttl-expired");
+        } catch (cleanupError) {
+          this.emitCleanupFailure(record.key, "pool-claim-expired", cleanupError);
+        }
+        continue;
+      }
+      const result = await this.startRunner(record);
+      if (result) {
+        this.ports.telemetry.emit("pool.claimed", {
+          jobKey: record.key,
+          hostId: record.compute!.serverId,
+        });
+        return { ...result, jobKey: record.key, expiresAt: record.expiresAt };
+      }
+    }
+    return null;
+  }
+
+  async releaseIdlePoolHost(sourceIp: string): Promise<boolean> {
+    if (!this.ports.compute.releaseIdleHost) {
+      throw new TerminalError("compute provider does not manage elastic shared hosts");
+    }
+    const active = (await this.ports.jobs.listActive()).some((record) =>
+      record.compute?.provider === "hetzner-pool-job"
+      && record.compute.publicIpv4 === sourceIp,
+    );
+    if (active) return false;
+    return await this.ports.compute.releaseIdleHost(sourceIp);
+  }
+
+  private async startRunner(record: JobRecord): Promise<BootstrapResult | null> {
+    if (record.state !== "awaiting-bootstrap" || !record.compute) return null;
+
     const bootstrapping: JobRecord = {
       ...record,
       version: record.version + 1,
@@ -68,8 +144,8 @@ export class Controller {
       updatedAt: this.ports.clock.now(),
     };
     delete bootstrapping.bootstrapTokenHash;
-    if (!(await this.ports.jobs.compareAndSet(jobKey, record.version, bootstrapping))) {
-      throw new TerminalError("bootstrap token is invalid or already consumed");
+    if (!(await this.ports.jobs.compareAndSet(record.key, record.version, bootstrapping))) {
+      return null;
     }
 
     let mintedRunnerId: number | undefined;
@@ -86,23 +162,23 @@ export class Controller {
         runnerId: jit.runnerId,
         updatedAt: this.ports.clock.now(),
       };
-      if (!(await this.ports.jobs.compareAndSet(jobKey, bootstrapping.version, running))) {
+      if (!(await this.ports.jobs.compareAndSet(record.key, bootstrapping.version, running))) {
         throw new RetryableError("job changed while consuming the bootstrap token", 5);
       }
-      this.ports.telemetry.emit("bootstrap.consumed", { jobKey, runnerId: jit.runnerId });
+      this.ports.telemetry.emit("bootstrap.consumed", { jobKey: record.key, runnerId: jit.runnerId });
       return { encodedJitConfig: jit.encodedJitConfig };
     } catch (error) {
       if (mintedRunnerId) {
         try {
           await this.ports.runners.deleteRunner(record.event, mintedRunnerId);
         } catch (cleanupError) {
-          this.emitCleanupFailure(jobKey, "bootstrap-runner", cleanupError);
+          this.emitCleanupFailure(record.key, "bootstrap-runner", cleanupError);
         }
       }
       try {
         await this.cleanup(bootstrapping, "bootstrap-failed");
       } catch (cleanupError) {
-        this.emitCleanupFailure(jobKey, "bootstrap-job", cleanupError);
+        this.emitCleanupFailure(record.key, "bootstrap-job", cleanupError);
       }
       throw error;
     }

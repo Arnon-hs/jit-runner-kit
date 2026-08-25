@@ -13,6 +13,7 @@ IAC_EFFECTIVE_LOCATION=""
 PROVISION_STATE_DIR=""
 PROVISION_RUN_KEY=""
 PROVISION_KEY_FILE=""
+PROVISION_HOST_KEY_FILE=""
 PROVISION_REPOSITORY=""
 
 usage() {
@@ -309,9 +310,10 @@ generate_jit_config() {
 wait_for_ssh() {
   local ip="$1"
   local key_file="$2"
+  local known_hosts_file="$3"
   for _ in $(seq 1 60); do
-    if ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "root@${ip}" true >/dev/null 2>&1; then
+    if ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+      -o "UserKnownHostsFile=${known_hosts_file}" -o ConnectTimeout=5 "root@${ip}" true >/dev/null 2>&1; then
       return 0
     fi
     sleep 5
@@ -322,9 +324,10 @@ wait_for_ssh() {
 wait_for_cloud_init() {
   local ip="$1"
   local key_file="$2"
+  local known_hosts_file="$3"
   for _ in $(seq 1 60); do
-    if ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+    if ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+      -o "UserKnownHostsFile=${known_hosts_file}" -o ConnectTimeout=5 \
       "root@${ip}" cloud-init status --wait >/dev/null 2>&1; then
       return 0
     fi
@@ -390,7 +393,8 @@ cleanup_failed_provision() {
   trap - EXIT
   set +e
   printf 'warning: provisioning failed; removing temporary resources\n' >&2
-  rm -f "$PROVISION_KEY_FILE" "${PROVISION_KEY_FILE}.pub"
+  rm -f "$PROVISION_KEY_FILE" "${PROVISION_KEY_FILE}.pub" \
+    "$PROVISION_HOST_KEY_FILE" "${PROVISION_HOST_KEY_FILE}.pub"
   if [[ -n "${GITHUB_RUNNER_ID:-}" && -n "$PROVISION_REPOSITORY" && -n "${JIT_RUNNER_GITHUB_TOKEN:-}" ]]; then
     github_request DELETE "repos/${PROVISION_REPOSITORY}/actions/runners/${GITHUB_RUNNER_ID}" >/dev/null
   fi
@@ -419,7 +423,8 @@ cmd_provision() {
   local extra_labels=""
   local ssh_allowed_cidr=""
   local run_key runner_label runner_name server_name expires_at public_ip public_key
-  local key_file state_file metadata_file metadata_tmp controller_ip server_id
+  local key_file host_key_file host_private_key host_public_key host_key_type host_key_data known_hosts_file
+  local state_file metadata_file metadata_tmp controller_ip server_id
   local -a location_candidates=()
   local location_candidate
 
@@ -469,12 +474,15 @@ cmd_provision() {
   mkdir -p "$state_dir"
   state_dir="$(cd "$state_dir" && pwd)"
   key_file="${state_dir}/runner_ed25519"
+  host_key_file="${state_dir}/host_ed25519"
+  known_hosts_file="${state_dir}/known_hosts"
   state_file="${state_dir}/terraform.tfstate"
   metadata_file="${state_dir}/metadata.json"
   expires_at="$(( $(date +%s) + ttl_minutes * 60 ))"
   PROVISION_STATE_DIR="$state_dir"
   PROVISION_RUN_KEY="$run_key"
   PROVISION_KEY_FILE="$key_file"
+  PROVISION_HOST_KEY_FILE="$host_key_file"
   PROVISION_REPOSITORY="$repository"
   trap 'cleanup_failed_provision "$?"' EXIT
 
@@ -494,6 +502,12 @@ cmd_provision() {
 
   ssh-keygen -q -t ed25519 -N '' -f "$key_file"
   public_key="$(<"${key_file}.pub")"
+  ssh-keygen -q -t ed25519 -N '' -f "$host_key_file"
+  host_private_key="$(<"$host_key_file")"
+  host_public_key="$(<"${host_key_file}.pub")"
+  TF_VAR_ssh_host_private_key="$host_private_key"
+  TF_VAR_ssh_host_public_key="$host_public_key"
+  export TF_VAR_ssh_host_private_key TF_VAR_ssh_host_public_key
   iac_init
 
   jq -n \
@@ -520,6 +534,7 @@ cmd_provision() {
     -var="public_key=${public_key}" \
     -var="ssh_allowed_cidr=${ssh_allowed_cidr}" \
     -var="expires_at=${expires_at}"
+  unset TF_VAR_ssh_host_private_key TF_VAR_ssh_host_public_key host_private_key
 
   if [[ -n "$IAC_EFFECTIVE_LOCATION" && "$IAC_EFFECTIVE_LOCATION" != "$location" ]]; then
     location="$IAC_EFFECTIVE_LOCATION"
@@ -530,19 +545,22 @@ cmd_provision() {
 
   public_ip="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw public_ipv4)"
   server_id="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw server_id)"
-  wait_for_ssh "$public_ip" "$key_file"
-  wait_for_cloud_init "$public_ip" "$key_file"
-  wait_for_ssh "$public_ip" "$key_file"
+  read -r host_key_type host_key_data _ <"${host_key_file}.pub"
+  [[ "$host_key_type" == ssh-ed25519 && -n "$host_key_data" ]] || die "invalid generated SSH host public key"
+  printf '%s %s %s\n' "$public_ip" "$host_key_type" "$host_key_data" >"$known_hosts_file"
+  wait_for_ssh "$public_ip" "$key_file" "$known_hosts_file"
+  wait_for_cloud_init "$public_ip" "$key_file" "$known_hosts_file"
+  wait_for_ssh "$public_ip" "$key_file" "$known_hosts_file"
 
   {
     printf '%s\n%s\n%s\n' "$JIT_CONFIG" "$RUNNER_ASSET_URL" "$RUNNER_ASSET_SHA256"
     cat "${ROOT_DIR}/remote/start-jit-runner.sh"
-  } | ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null "root@${public_ip}" \
+  } | ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+    -o "UserKnownHostsFile=${known_hosts_file}" "root@${public_ip}" \
     'IFS= read -r JIT_CONFIG; IFS= read -r RUNNER_ASSET_URL; IFS= read -r RUNNER_ASSET_SHA256; export JIT_CONFIG RUNNER_ASSET_URL RUNNER_ASSET_SHA256; bash -se'
 
   wait_for_runner "$repository" "$GITHUB_RUNNER_ID"
-  rm -f "$key_file" "${key_file}.pub"
+  rm -f "$key_file" "${key_file}.pub" "$host_key_file" "${host_key_file}.pub" "$known_hosts_file"
 
   write_output server-id "$server_id"
   write_output public-ip "$public_ip"
@@ -572,6 +590,8 @@ iac_destroy_from_state() {
     -var="location=${location}" \
     -var="image=${image}" \
     -var="public_key=${public_key}" \
+    -var="ssh_host_private_key=destroy-placeholder" \
+    -var="ssh_host_public_key=ssh-ed25519 destroy-placeholder" \
     -var="ssh_allowed_cidr=${ssh_allowed_cidr}" \
     -var="expires_at=${expires_at}"
 }
@@ -616,7 +636,7 @@ cmd_destroy() {
 
 cmd_sweep() {
   local dry_run=false
-  local now resource response ids id
+  local now manager resource response ids id
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run) dry_run=true; shift ;;
@@ -626,24 +646,26 @@ cmd_sweep() {
   for command in curl jq; do require_command "$command"; done
   require_secret HCLOUD_TOKEN
   now="$(date +%s)"
-  for resource in servers firewalls primary_ips ssh_keys; do
-    response="$(hcloud_request GET "$resource" --get --data-urlencode "label_selector=managed_by=${MANAGED_BY}")"
-    ids="$(jq -r --arg resource "$resource" --argjson now "$now" '.[$resource][] | select((.labels.expires_at // "") | test("^[0-9]+$")) | select((.labels.expires_at | tonumber) <= $now) | .id' <<<"$response")"
-    while IFS= read -r id; do
-      [[ -n "$id" ]] || continue
-      if [[ "$dry_run" == true ]]; then
-        printf 'would-delete %s/%s\n' "$resource" "$id"
-      else
-        hcloud_request DELETE "${resource}/${id}" >/dev/null || true
-        printf 'deleted %s/%s\n' "$resource" "$id"
-      fi
-    done <<<"$ids"
+  for manager in "$MANAGED_BY" jit-runner-kit-pool; do
+    for resource in servers primary_ips firewalls ssh_keys; do
+      response="$(hcloud_request GET "$resource" --get --data-urlencode "label_selector=managed_by=${manager}")"
+      ids="$(jq -r --arg resource "$resource" --argjson now "$now" '.[$resource][] | select((.labels.expires_at // "") | test("^[0-9]+$")) | select((.labels.expires_at | tonumber) <= $now) | .id' <<<"$response")"
+      while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if [[ "$dry_run" == true ]]; then
+          printf 'would-delete manager=%s %s/%s\n' "$manager" "$resource" "$id"
+        else
+          hcloud_request DELETE "${resource}/${id}" >/dev/null || true
+          printf 'deleted manager=%s %s/%s\n' "$manager" "$resource" "$id"
+        fi
+      done <<<"$ids"
+    done
   done
 }
 
 cmd_inventory() {
   local require_empty=false
-  local resource response count total=0
+  local manager prefix resource response count total=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --require-empty) require_empty=true; shift ;;
@@ -652,11 +674,14 @@ cmd_inventory() {
   done
   for command in curl jq; do require_command "$command"; done
   require_secret HCLOUD_TOKEN
-  for resource in servers firewalls primary_ips ssh_keys; do
-    response="$(hcloud_request GET "$resource" --get --data-urlencode "label_selector=managed_by=${MANAGED_BY}")"
-    count="$(jq -r --arg resource "$resource" '.[$resource] | length' <<<"$response")"
-    printf '%s=%s\n' "$resource" "$count"
-    total=$((total + count))
+  for manager in "$MANAGED_BY" jit-runner-kit-pool; do
+    if [[ "$manager" == "$MANAGED_BY" ]]; then prefix=ephemeral; else prefix=pool; fi
+    for resource in servers firewalls primary_ips ssh_keys; do
+      response="$(hcloud_request GET "$resource" --get --data-urlencode "label_selector=managed_by=${manager}")"
+      count="$(jq -r --arg resource "$resource" '.[$resource] | length' <<<"$response")"
+      printf '%s_%s=%s\n' "$prefix" "$resource" "$count"
+      total=$((total + count))
+    done
   done
   printf 'total=%s\n' "$total"
   if [[ "$require_empty" == true && "$total" != 0 ]]; then

@@ -1,0 +1,34 @@
+FROM ubuntu:24.04
+
+ARG RUNNER_VERSION
+ARG RUNNER_SHA256_X64
+ARG RUNNER_SHA256_ARM64
+ARG TARGETARCH
+
+RUN test -n "$RUNNER_VERSION" && test -n "$RUNNER_SHA256_X64" && test -n "$RUNNER_SHA256_ARM64" \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+      build-essential ca-certificates curl docker-compose-v2 docker.io git jq php-cli python3 shellcheck unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1001 --shell /bin/bash runner \
+    && install -d -o runner -g runner /opt/actions-runner /runner \
+    && case "$TARGETARCH" in \
+         amd64) runner_arch=x64; runner_sha="$RUNNER_SHA256_X64" ;; \
+         arm64) runner_arch=arm64; runner_sha="$RUNNER_SHA256_ARM64" ;; \
+         *) exit 1 ;; \
+       esac \
+    && curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+      --output /tmp/actions-runner.tar.gz \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${runner_arch}-${RUNNER_VERSION}.tar.gz" \
+    && echo "${runner_sha}  /tmp/actions-runner.tar.gz" | sha256sum --check --strict \
+    && tar --extract --gzip --file /tmp/actions-runner.tar.gz --directory /opt/actions-runner \
+    && rm /tmp/actions-runner.tar.gz \
+    && /opt/actions-runner/bin/installdependencies.sh \
+    && chown -R runner:runner /opt/actions-runner /runner
+
+COPY --chown=runner:runner runner-entrypoint.sh /usr/local/bin/jit-runner-entrypoint
+RUN chmod 0555 /usr/local/bin/jit-runner-entrypoint
+
+USER runner
+WORKDIR /runner
+ENTRYPOINT ["/usr/local/bin/jit-runner-entrypoint"]

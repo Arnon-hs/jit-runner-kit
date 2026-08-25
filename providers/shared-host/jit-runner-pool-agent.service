@@ -1,0 +1,28 @@
+[Unit]
+Description=JIT Runner Kit shared-host pool agent
+After=docker.service network-online.target cloud-final.service
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/jit-runner-kit/pool.env
+ExecStart=/usr/local/bin/jit-runner-pool-agent
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/jit-runner-kit /var/run/docker.sock
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
