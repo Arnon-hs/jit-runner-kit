@@ -45,7 +45,7 @@ runner deregisters -> controller destroys resources -> TTL sweep is the backstop
 
 The JIT configuration is never placed in cloud-init, infrastructure state, or workflow artifacts. The runner package is resolved from the latest official GitHub release and its published SHA-256 digest is verified before extraction.
 
-The Hetzner image installs Docker with Compose v2, GitHub CLI, ShellCheck, Python 3, and a native build toolchain. The official runner dependency installer runs before registration. The unprivileged `runner` user is not granted sudo access.
+The Hetzner image installs Docker with Compose v2, GitHub CLI, ShellCheck, PHP CLI, Python 3, and a native build toolchain. The official runner dependency installer runs before registration. The unprivileged `runner` user is not granted sudo access.
 
 ## Choose an operating mode
 

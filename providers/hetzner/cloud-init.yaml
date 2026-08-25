@@ -11,6 +11,7 @@ packages:
   - gh
   - git
   - jq
+  - php-cli
   - python3
   - shellcheck
   - unzip
