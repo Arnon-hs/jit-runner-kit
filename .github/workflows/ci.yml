@@ -34,7 +34,7 @@ jobs:
       run-key: ${{ steps.runner.outputs.run-key }}
     steps:
       - id: runner
-        uses: Arnon-hs/jit-runner-kit/actions/provision@8da3fac3bcefaf9671d8eb8115f0ead5c3b5cf51
+        uses: Arnon-hs/jit-runner-kit/actions/provision@04b4b021f38493117a68ed52c605e01f2f495f35
         with:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
           github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
@@ -74,7 +74,7 @@ jobs:
         with:
           name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/jit-runner-state
-      - uses: Arnon-hs/jit-runner-kit/actions/destroy@8da3fac3bcefaf9671d8eb8115f0ead5c3b5cf51
+      - uses: Arnon-hs/jit-runner-kit/actions/destroy@04b4b021f38493117a68ed52c605e01f2f495f35
         with:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
           github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
