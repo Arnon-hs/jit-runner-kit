@@ -1,13 +1,14 @@
 # Serverless controller architecture
 
-Status: accepted direction; implementation is roadmap work.
+Status: initial implementation on `main`; local conformance and Worker bundle validation complete, live-cloud canaries still required before production use.
 
-JIT Runner Kit will keep lifecycle policy in a provider-agnostic core and put deployment details behind adapters. Cloudflare is the first planned controller platform and Hetzner Cloud is the first compute provider. Neither is part of the core contract.
+JIT Runner Kit keeps lifecycle policy in a provider-agnostic core and puts deployment details behind adapters. Cloudflare is the first implemented controller platform and Hetzner Cloud is the first compute provider. Neither is part of the core contract.
 
 ## Invariants
 
 - One workflow job receives one VM and one JIT registration.
 - Only authenticated, allowlisted `workflow_job` events from trusted repositories can create compute.
+- Each eligible workflow carries a run-scoped label so an untrusted queued run cannot take a runner created for a trusted run.
 - Event delivery is at-least-once; every transition and provider operation must therefore be idempotent.
 - A global or tenant concurrency lease is acquired before compute creation.
 - JIT configuration and bootstrap credentials are never durable state.
@@ -50,7 +51,7 @@ Provider adapters translate their native errors into core error classes such as 
 
 ## First adapters
 
-The first serverless controller adapter is planned for Cloudflare:
+The first serverless controller adapter is implemented for Cloudflare:
 
 - Workers receive GitHub App webhooks and expose the one-time bootstrap exchange.
 - Queues isolate webhook acknowledgement from provisioning and cleanup work.
@@ -58,17 +59,17 @@ The first serverless controller adapter is planned for Cloudflare:
 - Cron triggers reconciliation and TTL cleanup.
 - encrypted Worker secrets hold installation credentials and provider tokens.
 
-The first compute adapter uses the Hetzner Cloud API. It owns Hetzner request/response translation and labels every resource with stable ownership, job, lease, and expiry identifiers.
+The first compute adapter uses the Hetzner Cloud API. It owns Hetzner request/response translation and labels every resource with stable ownership, job, controller, repository, and expiry identifiers. Serverless VMs have a deny-inbound firewall and no SSH key.
 
 ## Serverless lifecycle
 
 ```text
 workflow_job: queued
-  -> verify signature, installation, repository, event, branch, labels
+  -> verify signature, installation, repository, event, branch, static label, run-scoped label
   -> create or load idempotent job record
   -> acquire concurrency lease
   -> create labeled VM with a one-time bootstrap token
-  -> VM exchanges the token after attestation checks
+  -> VM exchanges the unexpired token after attestation checks and an atomic state claim
   -> controller requests JIT config and returns it once
   -> runner executes exactly one job
 
@@ -79,16 +80,18 @@ workflow_job: completed
   -> transition to completed
 
 Cron reconciliation
-  -> list expired provider labels
+  -> attempt every expired job cleanup without global short-circuit
+  -> list expired provider labels even after an individual cleanup failure
   -> remove orphaned runner and compute resources
   -> expire abandoned leases
+  -> prune old terminal controller records
 ```
 
 Serverless mode does not require a Mac mini, permanent controller VPS, inbound SSH, or local OpenTofu state. The VM gets only a one-time bootstrap token. JIT configuration is issued only after successful token consumption and is not stored after the response.
 
 ## Package boundaries
 
-The planned package layout makes adapters additive:
+The package layout makes adapters additive:
 
 ```text
 packages/
@@ -97,12 +100,12 @@ packages/
   adapter-github-control-jobs/
   adapter-controller-cloudflare/
   adapter-compute-hetzner/
-  adapter-state-cloudflare-do/
-  adapter-queue-cloudflare/
+  adapter-github-app/
+  crypto/
 ```
 
 Future Cloud Run, AWS Lambda, conventional webhook-service, or compute-provider adapters implement the same contracts. Adding one must not require a fork or provider conditionals in the core.
 
 ## Delivery boundary
 
-The current Bash/OpenTofu GitHub control-job mode remains supported while this design is implemented and tested. Consumers should not deploy the Cloudflare adapter until the current mode has stable cleanup evidence and the serverless conformance suite passes real-cloud canaries.
+The current Bash/OpenTofu GitHub control-job mode remains supported. The Cloudflare adapter is ready for a dedicated-project canary, not an unqualified production rollout. Operators must complete the checklist in [Deploy the Cloudflare controller](cloudflare-controller.md), including success, failure, cancellation, DLQ, and TTL cleanup evidence with a final empty Hetzner inventory.

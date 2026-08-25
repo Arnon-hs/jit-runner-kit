@@ -13,12 +13,12 @@ This roadmap describes direction, not delivery promises.
 
 ## Near term
 
-- [ ] Implement the provider-agnostic controller core and its state-machine contract.
-- [ ] Add the first controller adapter: Cloudflare Workers, GitHub App/webhooks, Queues, Durable Objects, and Cron.
-- [ ] Add the first compute adapter: Hetzner Cloud.
-- [ ] Use one-time bootstrap tokens so serverless mode needs no SSH or local OpenTofu state.
-- [ ] Add structured controller metrics and health output.
-- [ ] Add conformance tests for controller, compute, state, queue, secrets, and clock ports.
+- [x] Implement the provider-agnostic controller core and its state-machine contract.
+- [x] Add the first controller adapter: Cloudflare Workers, GitHub App/webhooks, Queues, Durable Objects, and Cron.
+- [x] Add the first compute adapter: Hetzner Cloud API.
+- [x] Use one-time bootstrap tokens so serverless mode needs no SSH or local OpenTofu state.
+- [x] Add structured controller events and health output.
+- [ ] Complete live-cloud conformance canaries for queue retry/DLQ, Durable Object recovery, GitHub App bootstrap, success, failure, cancellation, and TTL cleanup. Local core, crypto, compute, and bundle conformance tests are present.
 
 ## Later, if demand is demonstrated
 

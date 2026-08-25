@@ -1,0 +1,27 @@
+{
+  "name": "jit-runner-kit",
+  "version": "0.2.0-dev",
+  "description": "Provider-agnostic ephemeral GitHub Actions JIT runner controller and cloud adapters",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arnon-hs/jit-runner-kit.git"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check:serverless": "npm run typecheck && npm run test:serverless && npm run build:cloudflare",
+    "typecheck": "tsc --noEmit",
+    "test:serverless": "vitest run",
+    "build:cloudflare": "wrangler deploy --dry-run --config packages/adapter-controller-cloudflare/wrangler.jsonc --outdir .wrangler-dist"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260825.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.125.0"
+  }
+}

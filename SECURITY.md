@@ -25,6 +25,10 @@ The maintainer aims to acknowledge a complete report within five business days. 
 
 - Scope the Hetzner token to a dedicated CI project.
 - Scope the GitHub token to only the repositories that need runners and grant only Actions read and repository Administration write.
+- In serverless mode, prefer a GitHub App installed only on served repositories. Store its private key, webhook secret, and the Hetzner token only as encrypted Worker secrets.
+- Keep `ALLOWED_REPOSITORIES` and `TRUSTED_BRANCHES` explicit. Pull-request workloads are rejected by the Cloudflare adapter, including same-repository pull requests.
+- Keep `RUN_LABEL_PREFIX` non-empty and include `jit-run-${{ github.run_id }}` in every Cloudflare-controlled job. A shared static runner label alone does not bind a GitHub JIT runner to one queued workflow run.
+- Expose the bootstrap endpoint only over HTTPS. It accepts one hashed, single-use token and verifies the VM's observed public IPv4 before issuing JIT configuration.
 - Never expose the provisioning path or privileged secrets to untrusted pull-request code.
 - Keep runner VMs outside production networks and accounts.
 - Keep the TTL sweeper independent from workload jobs.

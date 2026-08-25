@@ -16,12 +16,14 @@ Prerequisites:
 - `curl`, `jq`, `ssh`, and `ssh-keygen`
 - ShellCheck
 - OpenTofu 1.7+ (recommended) or Terraform 1.7+
+- Node.js 22 and npm for the provider-agnostic core and serverless adapters
 
 Run all checks:
 
 ```bash
 git clone https://github.com/Arnon-hs/jit-runner-kit.git
 cd jit-runner-kit
+npm ci
 make check
 ```
 
@@ -31,7 +33,7 @@ To validate with Terraform instead of OpenTofu:
 make IAC=terraform check
 ```
 
-The tests mock GitHub and Hetzner APIs and must not create real cloud resources.
+The tests mock GitHub, Cloudflare, and Hetzner boundaries and must not create real cloud resources. `npm run build:cloudflare` performs a Wrangler dry-run bundle only.
 
 ## Change expectations
 
@@ -42,6 +44,8 @@ The tests mock GitHub and Hetzner APIs and must not create real cloud resources.
 - Add a regression test for bug fixes when practical.
 - Preserve explicit cleanup ownership labels and the TTL backstop.
 - Avoid adding dependencies when a small, testable shell implementation is sufficient.
+- Keep Cloudflare bindings and Hetzner/GitHub HTTP models out of `packages/core` and `packages/contracts`.
+- Add port-level conformance tests when introducing a controller, state, queue, secret, clock, or compute adapter.
 
 ## Commits and pull requests
 

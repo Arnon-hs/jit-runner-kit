@@ -1,0 +1,58 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "jit-runner-kit-controller",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-25",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CONTROLLER",
+        "class_name": "ControllerDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ControllerDurableObject"]
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TASK_QUEUE",
+        "queue": "jit-runner-kit-tasks"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "jit-runner-kit-tasks",
+        "dead_letter_queue": "jit-runner-kit-tasks-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "ALLOWED_REPOSITORIES": "owner/repository",
+    "TRUSTED_BRANCHES": "main",
+    "TRIGGER_LABEL": "jit-runner",
+    "RUN_LABEL_PREFIX": "jit-run-",
+    "MAX_RUNNERS": "2",
+    "TTL_SECONDS": "10800",
+    "SERVER_TYPE": "cx33",
+    "SERVER_LOCATION": "fsn1",
+    "SERVER_IMAGE": "ubuntu-24.04",
+    "RUNNER_ARCHITECTURE": "x64",
+    "PUBLIC_BASE_URL": "https://jit-runner-kit-controller.example.workers.dev"
+  }
+}
