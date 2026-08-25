@@ -12,6 +12,8 @@ All notable changes to this project are documented in this file. The format is b
 - A compatibility polling controller with repository allowlists and bounded concurrency.
 - Hetzner Cloud provisioning through OpenTofu or Terraform.
 - Independent TTL sweeping, recovery cleanup, and managed-resource inventory.
+- Bounded retries across ordered Hetzner location fallbacks when a zone has temporary capacity pressure.
+- Real-cloud success, failed-workload, and cancellation cleanup canaries.
 - Custom runner image guidance for packages, shells, language runtimes, and prebuilt images.
 - An accepted provider-agnostic serverless architecture with Cloudflare as the first controller adapter and Hetzner as the first compute adapter.
 - OSS governance, security, contribution, support, and maintenance documentation.

@@ -6,10 +6,10 @@ This roadmap describes direction, not delivery promises.
 
 - [x] Complete a real Hetzner end-to-end pilot with a non-production repository.
 - [x] Verify successful execution, failed provisioning rollback, explicit recovery cleanup, and TTL cleanup mechanics.
-- [ ] Verify cancellation and failed-workload paths in real cloud canaries.
-- [ ] Publish immutable action tags and release notes.
-- [ ] Enable private vulnerability reporting and branch protection.
-- [ ] Add an operator service example and log-retention guidance.
+- [x] Verify cancellation and failed-workload paths in real cloud canaries.
+- [x] Publish immutable action tags and release notes.
+- [x] Enable private vulnerability reporting and branch protection.
+- [x] Add an operator service example and log-retention guidance.
 
 ## Near term
 

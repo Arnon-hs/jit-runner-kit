@@ -2,7 +2,12 @@
 
 ## Supported versions
 
-The project is pre-1.0. Only the latest commit on `main` is currently evaluated for security fixes. Immutable supported releases will be listed here after the first public release.
+The project is pre-1.0. Security fixes are evaluated for the latest `0.1.x` release and the current `main` branch.
+
+| Version | Supported |
+| --- | --- |
+| `0.1.x` | Yes |
+| Earlier snapshots | No |
 
 ## Reporting a vulnerability
 

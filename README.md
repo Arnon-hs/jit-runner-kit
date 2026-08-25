@@ -15,7 +15,7 @@ Create a clean, one-job GitHub Actions runner on demand and delete its cloud res
 
 `jit-runner-kit` is for maintainers of trusted repositories who want elastic self-hosted runners without keeping an expensive build server online. The public interface is repository-independent and contains no application deployment logic. Hetzner Cloud is the first provider driver; the provider interface is intentionally small so more drivers can be added later.
 
-> **Project status:** pre-1.0 pilot. A real-cloud end-to-end run on Hetzner CX33 has passed, including JIT registration, workload execution, runner deregistration, and deletion of the VM, Primary IPv4, firewall, and SSH key. Failure-path cleanup has also been exercised. The project is validated for controlled pilots, but is not yet production-stable.
+> **Project status:** pre-1.0 pilot. Real-cloud end-to-end runs on Hetzner CX33 have passed, including JIT registration, workload execution, runner deregistration, and deletion of the VM, Primary IPv4, firewall, and SSH key. Cleanup after an intentionally failed workload and a cancelled workflow has also passed, followed by an empty managed-resource inventory. The project is validated for controlled pilots, but is not yet production-stable.
 
 ## Why it exists
 
