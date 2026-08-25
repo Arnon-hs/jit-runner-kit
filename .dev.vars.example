@@ -1,0 +1,5 @@
+# Local Wrangler development placeholders only. Never put real values in this file.
+GITHUB_WEBHOOK_SECRET=replace-with-a-random-local-test-value
+GITHUB_APP_ID=replace-with-a-local-test-app-id
+GITHUB_APP_PRIVATE_KEY=replace-with-a-local-test-pem
+HCLOUD_TOKEN=replace-with-a-dedicated-test-project-token

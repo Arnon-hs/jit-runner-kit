@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- A provider-agnostic TypeScript controller core with explicit job, lease, compute, runner, bootstrap, clock, and telemetry ports.
+- A Cloudflare Workers adapter using verified GitHub App webhooks, Queues with retry/DLQ configuration, a SQLite Durable Object, alarms, and Cron reconciliation.
+- A direct Hetzner Cloud API compute adapter that creates deny-inbound, SSH-free VMs and labels servers, Primary IPv4s, and firewalls for independent TTL cleanup.
+- A one-time bootstrap exchange that stores only the token digest, binds issuance to the VM public IPv4, and never persists JIT configuration.
+- Local conformance tests and a Wrangler dry-run build gate for the serverless packages.
+
+### Security
+
+- Serverless queued jobs require an authenticated webhook, repository allowlist, trusted branch, trigger label, and no pull-request association.
+- Serverless jobs require a signed run-scoped label, preventing an untrusted queued run from taking a runner created for a trusted run.
+- GitHub App installation tokens are scoped to the webhook repository, while Worker secrets keep App and Hetzner credentials out of durable state.
+- Bootstrap consumption is an atomic state transition, expired bootstrap tokens fail closed, provisioning is single-flight, and cleanup continues across independent resource failures.
+
 ## [0.1.0] - 2026-08-25
 
 ### Added

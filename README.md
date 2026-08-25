@@ -50,9 +50,19 @@ Need concurrent jobs or an always-on controller? See [Operate the controller](do
 | --- | ---: | --- | --- |
 | GitHub control jobs | Two short hosted jobs; self-hosted workload is not a hosted job | Current recommended integration | Hosted jobs are rounded and require a short-lived state artifact |
 | External polling controller | 0 | Compatibility and constrained accounts | Needs a trusted always-on controller host |
-| Serverless webhook controller | No hosted provision/cleanup jobs | Planned event-driven operation | Architecture accepted; implementation is not released yet |
+| Cloudflare serverless controller | No hosted provision/cleanup jobs | Event-driven controlled canaries | Initial implementation is available; live-cloud conformance is still required before production use |
 
 The GitHub control-job mode is the current recommended path. The provider-agnostic serverless design keeps it as a fallback adapter rather than removing it.
+
+## Cloudflare serverless controller
+
+The first serverless adapter is implemented with a verified GitHub App `workflow_job` webhook, Cloudflare Queues, a singleton SQLite Durable Object, Durable Object alarms, Cron reconciliation, and the direct Hetzner Cloud API compute adapter.
+
+It creates SSH-free, deny-inbound VMs. A VM receives only a one-time bootstrap token, exchanges it over HTTPS from its expected public IPv4, and receives a JIT configuration that is never written to Queue, Durable Object, cloud-init, or provider state.
+
+Cloudflare-controlled jobs must include both `jit-runner` and a run-scoped label: `"jit-run-${{ github.run_id }}"`. The controller verifies that label before provisioning so a queued pull-request run with shared static labels cannot take a runner created for a trusted branch run.
+
+Start with the complete [Cloudflare controller deployment and canary guide](docs/cloudflare-controller.md). Keep production workflows on the GitHub control-job adapter until its success, failure, cancellation, retry/DLQ, and TTL gates all pass with an empty final provider inventory.
 
 ## Requirements
 
@@ -154,7 +164,7 @@ bin/jit-runner inventory --require-empty
 - Infrastructure state contains cloud resource metadata and an SSH public key, but no private key or JIT configuration.
 - `if: always()` is not a cleanup guarantee. Run the TTL sweep independently.
 - Ephemeral logs disappear with the VM. Forward diagnostics before using this for high-value releases.
-- The polling controller is intentionally simple. The accepted webhook/serverless architecture is documented in [Serverless controller architecture](docs/serverless-controller-architecture.md).
+- The polling controller is intentionally simple. The implemented provider-agnostic webhook architecture is documented in [Serverless controller architecture](docs/serverless-controller-architecture.md), with Cloudflare setup in [Deploy the Cloudflare controller](docs/cloudflare-controller.md).
 
 Read the full [security policy](SECURITY.md) before operating the toolkit.
 
