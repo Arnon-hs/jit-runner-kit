@@ -47,6 +47,8 @@ The JIT configuration is never placed in cloud-init, infrastructure state, or wo
 
 The Hetzner image installs Docker with Compose v2, GitHub CLI, ShellCheck, PHP CLI, Python 3, and a native build toolchain. The official runner dependency installer runs before registration. The unprivileged `runner` user is not granted sudo access.
 
+Need another shell, language runtime, or system library? The runner image is deliberately built from a small, readable cloud-init file. See [Customize the runner image](docs/custom-runner-image.md) for safe package-list changes, Bash/Zsh/Fish examples, third-party repository guidance, custom images, and validation steps.
+
 ## Choose an operating mode
 
 | Mode | GitHub-hosted minutes | Best for | Trade-off |
