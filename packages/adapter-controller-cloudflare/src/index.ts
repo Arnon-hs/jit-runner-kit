@@ -19,6 +19,9 @@ export interface Env {
   GITHUB_WEBHOOK_SECRET: string;
   GITHUB_APP_ID: string;
   GITHUB_APP_PRIVATE_KEY: string;
+  GITHUB_ORGANIZATION: string;
+  RUNNER_GROUP_ID: string;
+  TRUSTED_WORKFLOWS: string;
   HCLOUD_TOKEN: string;
   ALLOWED_REPOSITORIES: string;
   TRUSTED_BRANCHES: string;
@@ -26,6 +29,7 @@ export interface Env {
   RUN_LABEL_PREFIX: string;
   MAX_RUNNERS: string;
   TTL_SECONDS: string;
+  PROVISIONING_TIMEOUT_SECONDS: string;
   SERVER_TYPE: string;
   SERVER_LOCATION: string;
   SERVER_IMAGE: string;
@@ -87,6 +91,7 @@ export default {
 
 export class ControllerDurableObject {
   private readonly controller: Controller;
+  private readonly config: ControllerConfig;
   private readonly jobs: CloudflareJobStore;
 
   constructor(
@@ -94,15 +99,19 @@ export class ControllerDurableObject {
     env: Env,
   ) {
     this.jobs = new CloudflareJobStore(state.storage);
+    this.config = readControllerConfig(env);
     const clock: Clock = { now: () => Math.floor(Date.now() / 1000) };
     const telemetry = new JsonTelemetry();
-    this.controller = new Controller(readControllerConfig(env), {
+    this.controller = new Controller(this.config, {
       jobs: this.jobs,
       leases: new CloudflareLeaseStore(state.storage, clock),
       compute: new HetznerComputeProvider({ token: required(env.HCLOUD_TOKEN, "HCLOUD_TOKEN") }),
       runners: new GithubAppRunnerControl({
         appId: required(env.GITHUB_APP_ID, "GITHUB_APP_ID"),
         privateKey: required(env.GITHUB_APP_PRIVATE_KEY, "GITHUB_APP_PRIVATE_KEY"),
+        organization: required(env.GITHUB_ORGANIZATION, "GITHUB_ORGANIZATION"),
+        runnerGroupId: positiveInteger(env.RUNNER_GROUP_ID, "RUNNER_GROUP_ID"),
+        trustedWorkflows: csv(env.TRUSTED_WORKFLOWS),
       }),
       bootstrapTokens: new WebCryptoBootstrapTokenBroker(),
       clock,
@@ -148,7 +157,12 @@ export class ControllerDurableObject {
   private async scheduleNextAlarm(): Promise<void> {
     const active = await this.jobs.listActive();
     const next = active.reduce<number | null>(
-      (earliest, job) => (earliest === null || job.expiresAt < earliest ? job.expiresAt : earliest),
+      (earliest, job) => {
+        const due = job.state === "provisioning"
+          ? Math.min(job.expiresAt, job.updatedAt + this.config.provisioningTimeoutSeconds)
+          : job.expiresAt;
+        return earliest === null || due < earliest ? due : earliest;
+      },
       null,
     );
     if (next === null) {
@@ -216,6 +230,10 @@ class CloudflareLeaseStore implements LeaseStore {
   async release(scope: string, holder: string): Promise<void> {
     await this.storage.delete(`lease:${scope}:${holder}`);
   }
+
+  async retain(scope: string, holder: string, expiresAt: number): Promise<void> {
+    await this.storage.put(`lease:${scope}:${holder}`, { holder, expiresAt } satisfies LeaseRecord);
+  }
 }
 
 class JsonTelemetry implements Telemetry {
@@ -262,6 +280,10 @@ function readControllerConfig(env: Env): ControllerConfig {
   return {
     maxRunners: positiveInteger(env.MAX_RUNNERS, "MAX_RUNNERS"),
     ttlSeconds: positiveInteger(env.TTL_SECONDS, "TTL_SECONDS"),
+    provisioningTimeoutSeconds: positiveInteger(
+      env.PROVISIONING_TIMEOUT_SECONDS,
+      "PROVISIONING_TIMEOUT_SECONDS",
+    ),
     serverType: required(env.SERVER_TYPE, "SERVER_TYPE"),
     location: required(env.SERVER_LOCATION, "SERVER_LOCATION"),
     image: required(env.SERVER_IMAGE, "SERVER_IMAGE"),

@@ -50,7 +50,7 @@ Need concurrent jobs or an always-on controller? See [Operate the controller](do
 | --- | ---: | --- | --- |
 | GitHub control jobs | Two short hosted jobs; self-hosted workload is not a hosted job | Current recommended integration | Hosted jobs are rounded and require a short-lived state artifact |
 | External polling controller | 0 | Compatibility and constrained accounts | Needs a trusted always-on controller host |
-| Cloudflare serverless controller | No hosted provision/cleanup jobs | Event-driven controlled canaries | Initial implementation is available; live-cloud conformance is still required before production use |
+| Cloudflare serverless controller | No hosted provision/cleanup jobs | Private repositories in a GitHub organization | Requires a workflow-restricted runner group and live-cloud conformance before production use |
 
 The GitHub control-job mode is the current recommended path. The provider-agnostic serverless design keeps it as a fallback adapter rather than removing it.
 
@@ -60,7 +60,7 @@ The first serverless adapter is implemented with a verified GitHub App `workflow
 
 It creates SSH-free, deny-inbound VMs. A VM receives only a one-time bootstrap token, exchanges it over HTTPS from its expected public IPv4, and receives a JIT configuration that is never written to Queue, Durable Object, cloud-init, or provider state.
 
-Cloudflare-controlled jobs must include both `jit-runner` and a run-scoped label: `"jit-run-${{ github.run_id }}"`. The controller verifies that label before provisioning so a queued pull-request run with shared static labels cannot take a runner created for a trusted branch run.
+Cloudflare-controlled jobs must use a private GitHub organization runner group restricted to an exact list of trusted workflow definitions. They also include both `jit-runner` and `"jit-run-${{ github.run_id }}"` as defense-in-depth routing labels. Labels alone are not a job-level security boundary because GitHub's JIT API accepts labels and a runner-group ID, not a job ID. Personal-account repositories should keep using the GitHub control-job adapter.
 
 Start with the complete [Cloudflare controller deployment and canary guide](docs/cloudflare-controller.md). Keep production workflows on the GitHub control-job adapter until its success, failure, cancellation, retry/DLQ, and TTL gates all pass with an empty final provider inventory.
 

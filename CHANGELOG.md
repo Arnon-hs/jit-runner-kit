@@ -15,9 +15,12 @@ All notable changes to this project are documented in this file. The format is b
 ### Security
 
 - Serverless queued jobs require an authenticated webhook, repository allowlist, trusted branch, trigger label, and no pull-request association.
-- Serverless jobs require a signed run-scoped label, preventing an untrusted queued run from taking a runner created for a trusted run.
+- Serverless jobs require a private organization runner group restricted to the exact configured workflow definitions; run-scoped labels remain defense in depth rather than a claimed job binding.
 - GitHub App installation tokens are scoped to the webhook repository, while Worker secrets keep App and Hetzner credentials out of durable state.
 - Bootstrap consumption is an atomic state transition, expired bootstrap tokens fail closed, provisioning is single-flight, and cleanup continues across independent resource failures.
+- Initial job claims cannot release another delivery's lease, compute-delete failures retain capacity, and ambiguous Hetzner creates are reconciled against a bootstrap-token digest before adoption.
+- Runner-group policy is revalidated immediately before JIT issuance, transport-level ambiguous creates enter recovery, and stale provisioning claims are retried on a shorter deadline.
+- Cleanup extends capacity before external deletion, and monotonic provider attempt fences prevent slow stale calls from deleting a newer VM.
 
 ## [0.1.0] - 2026-08-25
 
