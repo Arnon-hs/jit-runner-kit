@@ -16,12 +16,12 @@
       }
     ]
   },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["ControllerDurableObject"]
+  "exports": {
+    "ControllerDurableObject": {
+      "type": "durable-object",
+      "storage": "sqlite"
     }
-  ],
+  },
   "queues": {
     "producers": [
       {
@@ -43,7 +43,7 @@
     "crons": ["*/5 * * * *"]
   },
   "vars": {
-    "ALLOWED_REPOSITORIES": "owner/repository",
+    "ALLOWED_REPOSITORIES": "your-github-organization/example",
     "TRUSTED_BRANCHES": "main",
     "TRIGGER_LABEL": "jit-runner",
     "RUN_LABEL_PREFIX": "jit-run-",

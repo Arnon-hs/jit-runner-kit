@@ -1,0 +1,19 @@
+{
+  "name": "JIT Runner Kit Controller",
+  "url": "https://github.com/Arnon-hs/jit-runner-kit",
+  "hook_attributes": {
+    "url": "https://jit-runner-kit-controller.example.workers.dev/webhooks/github",
+    "active": true
+  },
+  "redirect_url": "https://github.com/Arnon-hs/jit-runner-kit",
+  "public": false,
+  "request_oauth_on_install": false,
+  "default_permissions": {
+    "actions": "read",
+    "metadata": "read",
+    "organization_self_hosted_runners": "write"
+  },
+  "default_events": [
+    "workflow_job"
+  ]
+}

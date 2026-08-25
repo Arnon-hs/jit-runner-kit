@@ -15,7 +15,7 @@ Create a clean, one-job GitHub Actions runner on demand and delete its cloud res
 
 `jit-runner-kit` is for maintainers of trusted repositories who want elastic self-hosted runners without keeping an expensive build server online. The public interface is repository-independent and contains no application deployment logic. Hetzner Cloud is the first provider driver; the provider interface is intentionally small so more drivers can be added later.
 
-> **Project status:** pre-1.0 pilot. Real-cloud end-to-end runs on Hetzner CX33 have passed, including JIT registration, workload execution, runner deregistration, and deletion of the VM, Primary IPv4, firewall, and SSH key. Cleanup after an intentionally failed workload and a cancelled workflow has also passed, followed by an empty managed-resource inventory. The project is validated for controlled pilots, but is not yet production-stable.
+> **Project status:** v0.2.0, pre-1.0. Real-cloud end-to-end runs for the GitHub control-job mode have passed on Hetzner CX33, including success, intentional failure, cancellation, and an empty final resource inventory. The Cloudflare serverless adapter, provider-agnostic core, offline deployment preflight, and infrastructure templates are release-ready for a controlled canary, but the serverless mode has not completed its live-cloud conformance gates and is not production-stable.
 
 ## Why it exists
 
@@ -63,6 +63,8 @@ It creates SSH-free, deny-inbound VMs. A VM receives only a one-time bootstrap t
 Cloudflare-controlled jobs must use a private GitHub organization runner group restricted to an exact list of trusted workflow definitions. They also include both `jit-runner` and `"jit-run-${{ github.run_id }}"` as defense-in-depth routing labels. Labels alone are not a job-level security boundary because GitHub's JIT API accepts labels and a runner-group ID, not a job ID. Personal-account repositories should keep using the GitHub control-job adapter.
 
 Start with the complete [Cloudflare controller deployment and canary guide](docs/cloudflare-controller.md). Keep production workflows on the GitHub control-job adapter until its success, failure, cancellation, retry/DLQ, and TTL gates all pass with an empty final provider inventory.
+
+The committed Wrangler and GitHub App files are inert templates. `npm run preflight:cloudflare` rejects their placeholders for a live setup, while `npm run check:cloudflare-config` validates template consistency without contacting Cloudflare, GitHub, or Hetzner.
 
 ## Requirements
 
