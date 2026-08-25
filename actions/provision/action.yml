@@ -21,6 +21,9 @@ inputs:
   location:
     description: Hetzner location.
     default: fsn1
+  fallback-locations:
+    description: Optional ordered comma-separated locations used after retryable capacity failures.
+    default: nbg1,hel1
   image:
     description: Hetzner image.
     default: ubuntu-24.04
@@ -92,6 +95,7 @@ runs:
         INPUT_REPOSITORY: ${{ inputs.repository }}
         INPUT_SERVER_TYPE: ${{ inputs.server-type }}
         INPUT_LOCATION: ${{ inputs.location }}
+        INPUT_FALLBACK_LOCATIONS: ${{ inputs.fallback-locations }}
         INPUT_IMAGE: ${{ inputs.image }}
         INPUT_ARCHITECTURE: ${{ inputs.architecture }}
         INPUT_TTL_MINUTES: ${{ inputs.ttl-minutes }}
@@ -108,6 +112,7 @@ runs:
           --state-dir "$state_dir" \
           --server-type "$INPUT_SERVER_TYPE" \
           --location "$INPUT_LOCATION" \
+          --fallback-locations "$INPUT_FALLBACK_LOCATIONS" \
           --image "$INPUT_IMAGE" \
           --architecture "$INPUT_ARCHITECTURE" \
           --ttl-minutes "$INPUT_TTL_MINUTES" \

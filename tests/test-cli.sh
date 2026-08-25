@@ -64,6 +64,9 @@ MOCK_CURL
 chmod +x "$TEST_TMP/bin/curl"
 cat >"$TEST_TMP/bin/tofu" <<'MOCK_TOFU'
 #!/usr/bin/env bash
+if [[ -n "${MOCK_TOFU_LOG:-}" ]]; then
+  printf '%s\n' "$*" >>"$MOCK_TOFU_LOG"
+fi
 for argument in "$@"; do
   case "$argument" in
     -state=*) state_file="${argument#-state=}" ;;
@@ -128,14 +131,19 @@ grep -q '/repos/owner/repository/actions/runners/777$' "$MOCK_CURL_LOG"
 set +e
 provision_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test \
   MOCK_TOFU_FAIL_ONCE="$TEST_TMP/tofu-apply" \
+  MOCK_TOFU_LOG="$TEST_TMP/tofu.log" \
   JIT_RUNNER_GITHUB_TOKEN=test "$CLI" provision --repository owner/repository \
-  --run-id 123 --state-dir "$TEST_TMP/failed-provision-state" 2>&1)"
+  --run-id 123 --state-dir "$TEST_TMP/failed-provision-state" \
+  --fallback-locations nbg1,hel1 2>&1)"
 provision_status=$?
 set -e
 [[ $provision_status -ne 0 ]]
 [[ "$provision_output" == *"provisioning failed; removing temporary resources"* ]]
 [[ "$provision_output" == *"retrying apply"* ]]
+[[ "$provision_output" == *"trying provider location nbg1"* ]]
 [[ "$provision_output" != *"unbound variable"* ]]
+grep -q -- '-var=location=fsn1' "$TEST_TMP/tofu.log"
+grep -q -- '-var=location=nbg1' "$TEST_TMP/tofu.log"
 grep -q '/repos/owner/repository/actions/runners/888$' "$MOCK_CURL_LOG"
 
 cat >"$TEST_TMP/controller.json" <<EOF

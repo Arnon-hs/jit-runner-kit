@@ -28,6 +28,7 @@ jobs:
           repository: ${{ github.repository }}
           server-type: cx33
           location: fsn1
+          fallback-locations: nbg1,hel1
           ttl-minutes: 180
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

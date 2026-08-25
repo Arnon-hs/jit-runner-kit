@@ -8,6 +8,8 @@ GITHUB_API_URL="${GITHUB_API_URL:-https://api.github.com}"
 GITHUB_API_VERSION="${GITHUB_API_VERSION:-2026-03-10}"
 MANAGED_BY="jit-runner-kit"
 IAC_CMD="${JIT_RUNNER_IAC_CMD:-}"
+IAC_LOCATION_CANDIDATES=""
+IAC_EFFECTIVE_LOCATION=""
 PROVISION_STATE_DIR=""
 PROVISION_RUN_KEY=""
 PROVISION_KEY_FILE=""
@@ -28,6 +30,7 @@ Provision options:
   --state-dir PATH              Infrastructure state directory
   --server-type TYPE            Hetzner server type (default: cx33)
   --location LOCATION           Hetzner location (default: fsn1)
+  --fallback-locations CSV      Ordered capacity fallbacks (example: nbg1,hel1)
   --image IMAGE                 Hetzner image (default: ubuntu-24.04)
   --architecture ARCH           x64 or arm64 (default: x64)
   --ttl-minutes NUMBER          Cleanup deadline (default: 180)
@@ -100,14 +103,35 @@ iac_init() {
 iac_apply_with_retry() {
   local attempt=1
   local max_attempts=4
-  local delay output status
+  local delay output status selected_location=""
+  local -a locations=()
+  local argument_index
+  if [[ -n "$IAC_LOCATION_CANDIDATES" ]]; then
+    IFS=',' read -r -a locations <<<"$IAC_LOCATION_CANDIDATES"
+  fi
   while (( attempt <= max_attempts )); do
+    local -a attempt_args=("$@")
+    if (( ${#locations[@]} > 0 )); then
+      selected_location="${locations[$(( (attempt - 1) % ${#locations[@]} ))]}"
+      for argument_index in "${!attempt_args[@]}"; do
+        if [[ "${attempt_args[$argument_index]}" == -var=location=* ]]; then
+          attempt_args[$argument_index]="-var=location=${selected_location}"
+        fi
+      done
+      if (( attempt > 1 )); then
+        printf 'warning: trying provider location %s (attempt %s/%s)\n' \
+          "$selected_location" "$attempt" "$max_attempts" >&2
+      fi
+    fi
     set +e
-    output="$(iac "$@" 2>&1)"
+    output="$(iac "${attempt_args[@]}" 2>&1)"
     status=$?
     set -e
     printf '%s\n' "$output"
-    (( status == 0 )) && return 0
+    if (( status == 0 )); then
+      IAC_EFFECTIVE_LOCATION="$selected_location"
+      return 0
+    fi
 
     if (( attempt == max_attempts )) ||
       ! grep -Eqi 'resource_unavailable|temporar(il)?y unavailable|rate.?limit|too many requests|timeout' <<<"$output"; then
@@ -387,6 +411,7 @@ cmd_provision() {
   local state_dir=""
   local server_type=cx33
   local location=fsn1
+  local fallback_locations=""
   local image=ubuntu-24.04
   local architecture=x64
   local ttl_minutes=180
@@ -394,7 +419,9 @@ cmd_provision() {
   local extra_labels=""
   local ssh_allowed_cidr=""
   local run_key runner_label runner_name server_name expires_at public_ip public_key
-  local key_file state_file metadata_file controller_ip server_id
+  local key_file state_file metadata_file metadata_tmp controller_ip server_id
+  local -a location_candidates=()
+  local location_candidate
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -404,6 +431,7 @@ cmd_provision() {
       --state-dir) state_dir="${2:-}"; shift 2 ;;
       --server-type) server_type="${2:-}"; shift 2 ;;
       --location) location="${2:-}"; shift 2 ;;
+      --fallback-locations) fallback_locations="${2:-}"; shift 2 ;;
       --image) image="${2:-}"; shift 2 ;;
       --architecture) architecture="${2:-}"; shift 2 ;;
       --ttl-minutes) ttl_minutes="${2:-}"; shift 2 ;;
@@ -419,6 +447,14 @@ cmd_provision() {
   validate_positive_integer ttl-minutes "$ttl_minutes"
   validate_positive_integer runner-group-id "$runner_group_id"
   [[ "$architecture" == x64 || "$architecture" == arm64 ]] || die "architecture must be x64 or arm64"
+  IAC_LOCATION_CANDIDATES="$location"
+  if [[ -n "$fallback_locations" ]]; then
+    IAC_LOCATION_CANDIDATES+=",${fallback_locations}"
+  fi
+  IFS=',' read -r -a location_candidates <<<"$IAC_LOCATION_CANDIDATES"
+  for location_candidate in "${location_candidates[@]}"; do
+    [[ "$location_candidate" =~ ^[a-z0-9-]+$ ]] || die "invalid provider location: $location_candidate"
+  done
 
   for command in curl jq ssh ssh-keygen; do require_command "$command"; done
   resolve_iac_command
@@ -484,6 +520,13 @@ cmd_provision() {
     -var="public_key=${public_key}" \
     -var="ssh_allowed_cidr=${ssh_allowed_cidr}" \
     -var="expires_at=${expires_at}"
+
+  if [[ -n "$IAC_EFFECTIVE_LOCATION" && "$IAC_EFFECTIVE_LOCATION" != "$location" ]]; then
+    location="$IAC_EFFECTIVE_LOCATION"
+    metadata_tmp="${metadata_file}.tmp"
+    jq --arg location "$location" '.location = $location' "$metadata_file" >"$metadata_tmp"
+    mv "$metadata_tmp" "$metadata_file"
+  fi
 
   public_ip="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw public_ipv4)"
   server_id="$(iac -chdir="$TF_DIR" output -state="$state_file" -raw server_id)"

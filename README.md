@@ -120,6 +120,8 @@ The full three-job example and the separate sweeper are in [`examples/github-act
 
 The actions use OpenTofu by default. Set `iac-engine: terraform` on both `provision` and `destroy` if Terraform is required.
 
+Provisioning retries transient provider errors with bounded backoff. The action also defaults to `nbg1,hel1` as ordered fallbacks after the primary `fsn1` location, so temporary capacity pressure in one zone does not fail the entire control job. Override `fallback-locations` with a comma-separated list, or set it to an empty string to stay in one location.
+
 ## Local CLI
 
 ```bash
@@ -129,6 +131,7 @@ export JIT_RUNNER_GITHUB_TOKEN='...'
 bin/jit-runner provision \
   --repository owner/private-repo \
   --run-id manual-001 \
+  --fallback-locations nbg1,hel1 \
   --state-dir .jit-runner-state/manual-001
 
 bin/jit-runner destroy \
