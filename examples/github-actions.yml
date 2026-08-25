@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       runner-label: ${{ steps.runner.outputs.runner-label }}
+      runner-id: ${{ steps.runner.outputs.runner-id }}
       run-key: ${{ steps.runner.outputs.run-key }}
     steps:
       - id: runner
@@ -55,5 +56,8 @@ jobs:
       - uses: your-org/jit-runner-kit/actions/destroy@v1
         with:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
+          github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
           state-dir: ${{ runner.temp }}/jit-runner-state
           run-key: ${{ needs.provision.outputs.run-key }}
+          repository: ${{ github.repository }}
+          runner-id: ${{ needs.provision.outputs.runner-id }}

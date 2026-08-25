@@ -13,7 +13,7 @@ usage() {
   cat <<'EOF'
 Usage:
   jit-runner provision --repository OWNER/REPO [options]
-  jit-runner destroy --state-dir PATH [--run-key KEY]
+  jit-runner destroy --state-dir PATH [--run-key KEY] [--repository OWNER/REPO --runner-id ID]
   jit-runner sweep [--dry-run]
 
 Provision options:
@@ -115,6 +115,33 @@ github_request() {
     --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
     "$@" \
     "${GITHUB_API_URL}/${endpoint}"
+}
+
+delete_github_runner_record() {
+  local repository="$1"
+  local runner_id="$2"
+  local status curl_status
+  validate_repository "$repository"
+  validate_positive_integer "runner ID" "$runner_id"
+  require_secret JIT_RUNNER_GITHUB_TOKEN
+
+  set +e
+  status="$(curl --silent --show-error \
+    --request DELETE \
+    --output /dev/null \
+    --write-out '%{http_code}' \
+    --header 'Accept: application/vnd.github+json' \
+    --header "Authorization: Bearer ${JIT_RUNNER_GITHUB_TOKEN}" \
+    --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
+    "${GITHUB_API_URL}/repos/${repository}/actions/runners/${runner_id}")"
+  curl_status=$?
+  set -e
+
+  (( curl_status == 0 )) || die "GitHub runner cleanup request failed"
+  case "$status" in
+    204|404) ;;
+    *) die "GitHub runner cleanup failed with HTTP ${status:-unknown}" ;;
+  esac
 }
 
 github_jit_request() {
@@ -375,6 +402,8 @@ cmd_provision() {
 
   jq -n \
     --arg run_key "$run_key" \
+    --arg repository "$repository" \
+    --arg runner_id "$GITHUB_RUNNER_ID" \
     --arg server_name "$server_name" \
     --arg server_type "$server_type" \
     --arg location "$location" \
@@ -382,7 +411,7 @@ cmd_provision() {
     --arg public_key "$public_key" \
     --arg ssh_allowed_cidr "$ssh_allowed_cidr" \
     --argjson expires_at "$expires_at" \
-    '{run_key:$run_key,server_name:$server_name,server_type:$server_type,location:$location,image:$image,public_key:$public_key,ssh_allowed_cidr:$ssh_allowed_cidr,expires_at:$expires_at}' \
+    '{run_key:$run_key,repository:$repository,runner_id:$runner_id,server_name:$server_name,server_type:$server_type,location:$location,image:$image,public_key:$public_key,ssh_allowed_cidr:$ssh_allowed_cidr,expires_at:$expires_at}' \
     >"$metadata_file"
 
   iac -chdir="$TF_DIR" apply -input=false -auto-approve -no-color \
@@ -451,10 +480,14 @@ iac_destroy_from_state() {
 cmd_destroy() {
   local state_dir=""
   local run_key=""
+  local repository=""
+  local runner_id=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --state-dir) state_dir="${2:-}"; shift 2 ;;
       --run-key) run_key="${2:-}"; shift 2 ;;
+      --repository) repository="${2:-}"; shift 2 ;;
+      --runner-id) runner_id="${2:-}"; shift 2 ;;
       *) die "unknown destroy option: $1" ;;
     esac
   done
@@ -465,7 +498,16 @@ cmd_destroy() {
   if [[ -z "$run_key" && -s "${state_dir}/metadata.json" ]]; then
     run_key="$(jq -r '.run_key // empty' "${state_dir}/metadata.json")"
   fi
+  if [[ -s "${state_dir}/metadata.json" ]]; then
+    [[ -n "$repository" ]] || repository="$(jq -r '.repository // empty' "${state_dir}/metadata.json")"
+    [[ -n "$runner_id" ]] || runner_id="$(jq -r '.runner_id // empty' "${state_dir}/metadata.json")"
+  fi
   [[ "$run_key" =~ ^[a-z0-9-]+$ ]] || die "a valid run key is required for safe cleanup"
+
+  if [[ -n "$repository" || -n "$runner_id" ]]; then
+    [[ -n "$repository" && -n "$runner_id" ]] || die "runner cleanup requires both repository and runner ID"
+    delete_github_runner_record "$repository" "$runner_id"
+  fi
 
   if ! iac_destroy_from_state "$state_dir"; then
     printf 'warning: infrastructure destroy was unavailable or failed; using label cleanup\n' >&2

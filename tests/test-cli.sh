@@ -23,10 +23,12 @@ set -e
 [[ "$invalid_output" == *"invalid GitHub repository"* ]]
 
 mkdir -p "$TEST_TMP/bin"
+export MOCK_CURL_LOG="$TEST_TMP/curl.log"
 cat >"$TEST_TMP/bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 url="${*: -1}"
+printf '%s\n' "$url" >>"$MOCK_CURL_LOG"
 case "$url" in
   */servers)
     printf '{"servers":[{"id":101,"labels":{"expires_at":"1"}},{"id":102,"labels":{"expires_at":"4102444800"}},{"id":103,"labels":{}}]}'
@@ -34,6 +36,8 @@ case "$url" in
   */firewalls) printf '{"firewalls":[]}' ;;
   */primary_ips) printf '{"primary_ips":[]}' ;;
   */ssh_keys) printf '{"ssh_keys":[]}' ;;
+  */repos/owner/repository/actions/runners/777) printf '204' ;;
+  */servers/[0-9]*|*/firewalls/[0-9]*|*/primary_ips/[0-9]*|*/ssh_keys/[0-9]*) ;;
   */actions/runs\?status=queued\&per_page=20)
     printf '{"workflow_runs":[{"id":55}]}'
     ;;
@@ -47,11 +51,25 @@ case "$url" in
 esac
 MOCK_CURL
 chmod +x "$TEST_TMP/bin/curl"
+cat >"$TEST_TMP/bin/tofu" <<'MOCK_TOFU'
+#!/usr/bin/env bash
+exit 0
+MOCK_TOFU
+chmod +x "$TEST_TMP/bin/tofu"
 
 sweep_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" sweep --dry-run)"
 [[ "$sweep_output" == "would-delete servers/101" ]]
 [[ "$sweep_output" != *"102"* ]]
 [[ "$sweep_output" != *"103"* ]]
+
+mkdir -p "$TEST_TMP/destroy-state"
+PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test JIT_RUNNER_GITHUB_TOKEN=test \
+  "$CLI" destroy \
+    --state-dir "$TEST_TMP/destroy-state" \
+    --run-key test-run \
+    --repository owner/repository \
+    --runner-id 777 >/dev/null
+grep -q '/repos/owner/repository/actions/runners/777$' "$MOCK_CURL_LOG"
 
 cat >"$TEST_TMP/controller.json" <<EOF
 {

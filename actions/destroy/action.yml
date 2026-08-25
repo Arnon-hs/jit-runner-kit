@@ -5,6 +5,9 @@ inputs:
   hcloud-token:
     description: Hetzner Cloud project token.
     required: true
+  github-token:
+    description: GitHub token with Administration write on the target repository.
+    required: true
   iac-engine:
     description: Infrastructure engine to install (opentofu or terraform).
     required: false
@@ -14,6 +17,12 @@ inputs:
     required: true
   run-key:
     description: Optional run key fallback when metadata is unavailable.
+    default: ""
+  repository:
+    description: Optional target repository fallback when metadata is unavailable.
+    default: ""
+  runner-id:
+    description: Optional GitHub runner ID fallback when metadata is unavailable.
     default: ""
 
 runs:
@@ -39,12 +48,18 @@ runs:
     - shell: bash
       env:
         HCLOUD_TOKEN: ${{ inputs.hcloud-token }}
+        JIT_RUNNER_GITHUB_TOKEN: ${{ inputs.github-token }}
         JIT_RUNNER_IAC_CMD: ${{ inputs.iac-engine == 'opentofu' && 'tofu' || 'terraform' }}
         INPUT_STATE_DIR: ${{ inputs.state-dir }}
         INPUT_RUN_KEY: ${{ inputs.run-key }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_RUNNER_ID: ${{ inputs.runner-id }}
       run: |
         args=(destroy --state-dir "$INPUT_STATE_DIR")
         if [[ -n "$INPUT_RUN_KEY" ]]; then
           args+=(--run-key "$INPUT_RUN_KEY")
+        fi
+        if [[ -n "$INPUT_REPOSITORY" && -n "$INPUT_RUNNER_ID" ]]; then
+          args+=(--repository "$INPUT_REPOSITORY" --runner-id "$INPUT_RUNNER_ID")
         fi
         "${GITHUB_ACTION_PATH}/../../bin/jit-runner" "${args[@]}"
