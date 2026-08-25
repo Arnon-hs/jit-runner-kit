@@ -189,9 +189,7 @@ resolve_runner_asset() {
   local architecture="$1"
   local asset_name release_json digest
   asset_name="actions-runner-linux-${architecture}-"
-  release_json="$(curl --fail-with-body --silent --show-error \
-    --header 'Accept: application/vnd.github+json' \
-    "${GITHUB_API_URL}/repos/actions/runner/releases/latest")"
+  release_json="$(github_request GET 'repos/actions/runner/releases/latest')"
   RUNNER_ASSET_URL="$(jq -r --arg prefix "$asset_name" '.assets[] | select(.name | startswith($prefix)) | .browser_download_url' <<<"$release_json" | head -1)"
   digest="$(jq -r --arg prefix "$asset_name" '.assets[] | select(.name | startswith($prefix)) | .digest' <<<"$release_json" | head -1)"
   [[ -n "$RUNNER_ASSET_URL" && "$RUNNER_ASSET_URL" != null ]] || die "GitHub runner asset not found for ${architecture}"
