@@ -109,4 +109,6 @@ For every successful and failed canary, verify:
 - `jit-runner inventory --require-empty` reports zero managed resources after cleanup;
 - deployment verification checks the exact release commit rather than only an HTTP 200 response.
 
+The repository's manual CI workflow accepts `workload-mode=fail` to exercise cleanup after an intentionally failed workload. For a cancellation canary, use a short `ttl-minutes` value, cancel only after the workload has started, then run the independent TTL sweeper after expiry and finish with `jit-runner inventory --require-empty`. Run these canaries in a dedicated cloud project with no unrelated resources.
+
 The selected control-plane adapter is the source of provisioning decisions, GitHub is the source of queued-job state, and the cloud provider is the source of resource existence. Healthy operation requires all three views to agree. See [Serverless controller architecture](serverless-controller-architecture.md) for the accepted provider-agnostic event-driven design.

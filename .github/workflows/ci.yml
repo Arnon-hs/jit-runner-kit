@@ -2,6 +2,20 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      workload-mode:
+        description: Dogfood workload outcome to exercise
+        required: true
+        default: success
+        type: choice
+        options:
+          - success
+          - fail
+      ttl-minutes:
+        description: Resource TTL for cleanup canaries
+        required: true
+        default: 180
+        type: number
   pull_request:
   push:
     branches: [main]
@@ -41,7 +55,7 @@ jobs:
           repository: ${{ github.repository }}
           server-type: cx33
           location: fsn1
-          ttl-minutes: 180
+          ttl-minutes: ${{ inputs.ttl-minutes }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
@@ -61,7 +75,14 @@ jobs:
         with:
           tofu_version: 1.12.6
           tofu_wrapper: false
-      - run: make check
+      - name: Run successful workload canary
+        if: inputs.workload-mode == 'success'
+        run: make check
+      - name: Fail workload canary intentionally
+        if: inputs.workload-mode == 'fail'
+        run: |
+          echo "Intentional dogfood failure: cleanup must still run."
+          exit 42
 
   dogfood-cleanup:
     name: Cleanup trusted JIT runner
