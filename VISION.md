@@ -9,6 +9,8 @@ Make short-lived, one-job GitHub Actions runners understandable and affordable f
 - Ephemeral GitHub JIT runner registration.
 - Provider drivers for temporary compute and narrow network access.
 - Safe state ownership, cleanup, and TTL recovery.
+- Provider-agnostic controller state and lifecycle logic.
+- Pluggable controller and compute adapters, including a GitHub control-job fallback.
 - A small controller that can run outside GitHub-hosted infrastructure.
 - Copyable examples and observable failure states.
 
@@ -23,4 +25,4 @@ Make short-lived, one-job GitHub Actions runners understandable and affordable f
 
 ## Decision rules
 
-Changes should preserve the one-job isolation model, keep cleanup independently recoverable, avoid storing JIT configuration in durable state, and remain useful outside any one consumer repository. Features that materially increase operator privilege or maintenance burden require a public design discussion first.
+Changes should preserve the one-job isolation model, keep cleanup independently recoverable, avoid storing JIT configuration in durable state, and remain useful outside any one consumer repository. Core packages must not import provider bindings or provider-specific HTTP models. Features that materially increase operator privilege or maintenance burden require a public design discussion first.

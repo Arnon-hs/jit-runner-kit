@@ -1,17 +1,18 @@
 # Operate the controller
 
-JIT Runner Kit separates scheduling from execution:
+JIT Runner Kit separates scheduling from execution in every operating mode:
 
 - GitHub Actions owns the workflow queue and assigns a queued job to a matching runner.
-- `jit-runner-controller` is the external control plane. It polls allowlisted repositories, requests a one-job JIT configuration, provisions the VM, observes completion, and destroys the resources.
+- In the recommended current mode, short GitHub-hosted provision and cleanup jobs are the control plane. The heavy workload runs only on the ephemeral runner.
+- `jit-runner-controller` remains a compatibility control plane. It polls allowlisted repositories, requests a one-job JIT configuration, provisions the VM, observes completion, and destroys the resources.
 - Hetzner runs the untrusted build and deployment commands inside an ephemeral VM.
 - Your application platform, such as Zeabur, remains the deployment target. It is not the runner controller.
 
-The controller must run outside the GitHub Actions workflow it is serving. Otherwise no runner exists to start the job that would create the runner. A Mac mini, a small always-on VPS, or another trusted host with outbound HTTPS and SSH access can run it.
+In GitHub control-job mode, the provision job runs before the dynamically labeled workload and cleanup runs with `if: always()`. Neither control job checks out application code or runs builds, tests, or deployment commands. In polling mode, the controller must run outside the workflow it serves; no permanent controller host is needed in GitHub control-job mode.
 
 ## Run jobs concurrently
 
-`max_runners` is the controller-wide concurrency limit:
+`max_runners` is the polling controller's global concurrency limit:
 
 ```json
 {
@@ -33,13 +34,14 @@ Choose a conservative limit:
 
 | Controller host | Suggested starting point | Why |
 | --- | ---: | --- |
-| Laptop or Mac mini controller | `2` | The controller does little work; the limit mainly bounds cloud spend. |
-| Small always-on VPS controller | `2` to `4` | Suitable when several repositories release together. |
+| Compatibility polling controller | `2` | The controller does little work; the limit mainly bounds cloud spend. |
 | First production pilot | `1` | Simplest failure analysis and cost observation. |
 
 Concurrency shortens wall-clock time. It does not make each VM cheaper, and the cloud provider may apply a minimum billable interval to every VM and attached resource.
 
-## Keep the controller running
+GitHub `concurrency` groups are repository-local, so identical groups do not enforce a global limit across several repositories. Until a serverless lease adapter is available, coordinate cross-repository dispatches operationally or use the polling controller's `max_runners`. Do not implement the cap by placing several secret-bearing jobs on one VM.
+
+## Keep the compatibility controller running
 
 Run the controller as a dedicated, unprivileged service account. The account needs:
 
@@ -82,4 +84,4 @@ For every successful and failed canary, verify:
 - the TTL sweeper is able to find and remove deliberately stale test resources;
 - deployment verification checks the exact release commit rather than only an HTTP 200 response.
 
-The controller is the source of provisioning decisions, GitHub is the source of queued-job state, and the cloud provider is the source of resource existence. Healthy operation requires all three views to agree.
+The selected control-plane adapter is the source of provisioning decisions, GitHub is the source of queued-job state, and the cloud provider is the source of resource existence. Healthy operation requires all three views to agree. See [Serverless controller architecture](serverless-controller-architecture.md) for the accepted provider-agnostic event-driven design.

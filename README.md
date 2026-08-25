@@ -2,14 +2,14 @@
   <img src="docs/images/jit-runner-mark.svg" width="72" alt="JIT Runner Kit" />
   <h1>JIT Runner Kit</h1>
   <p><strong>Fresh GitHub Actions runners. One job, one VM, zero idle compute.</strong></p>
-  <p><a href="#quickstart-zero-hosted-minutes">Quickstart</a> · <a href="#architecture">Architecture</a> · <a href="SECURITY.md">Security</a> · <a href="CONTRIBUTING.md">Contributing</a> · <a href="https://github.com/Arnon-hs/jit-runner-kit/discussions">Discussions</a></p>
+  <p><a href="#github-actions-control-job-mode">Quickstart</a> · <a href="#architecture">Architecture</a> · <a href="SECURITY.md">Security</a> · <a href="CONTRIBUTING.md">Contributing</a> · <a href="https://github.com/Arnon-hs/jit-runner-kit/discussions">Discussions</a></p>
   <a href="https://github.com/Arnon-hs/jit-runner-kit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Arnon-hs/jit-runner-kit/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="ROADMAP.md"><img alt="Pre-1.0 pilot" src="https://img.shields.io/badge/status-pre--1.0%20pilot-f59e0b.svg" /></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-4f46e5.svg" /></a>
   <a href="https://opentofu.org/"><img alt="OpenTofu" src="https://img.shields.io/badge/IaC-OpenTofu-ffda18.svg" /></a>
 </div>
 
-> Provider-independent, MIT-licensed infrastructure for trusted repositories that need elastic self-hosted CI without an always-on build fleet.
+> Provider-agnostic, MIT-licensed infrastructure for trusted repositories that need elastic self-hosted CI without an always-on build fleet.
 
 Create a clean, one-job GitHub Actions runner on demand and delete its cloud resources afterward.
 
@@ -20,7 +20,7 @@ Create a clean, one-job GitHub Actions runner on demand and delete its cloud res
 ## Why it exists
 
 - Pay for short-lived cloud capacity instead of idle CI machines.
-- Spend zero GitHub-hosted minutes by running the controller outside GitHub Actions.
+- Keep GitHub-hosted control jobs short while heavy work runs on temporary cloud capacity.
 - Give every job a fresh VM and a GitHub just-in-time (JIT) runner registration.
 - Limit cleanup blast radius with ownership labels, per-run state, and an independent TTL sweep.
 - Keep application workflows independent from the runner provider implementation.
@@ -28,19 +28,12 @@ Create a clean, one-job GitHub Actions runner on demand and delete its cloud res
 ## Architecture
 
 ```text
-queued job with label "jit-runner"
-              |
-              v
-external controller polls GitHub
-              |
-              v
-OpenTofu/Terraform -> temporary Hetzner VM + firewall + IPv4 + SSH key
-              |
-              v
-JIT configuration streamed over SSH -> one GitHub Actions job
-              |
-              v
-runner deregisters -> controller destroys resources -> TTL sweep is the backstop
+GitHub workflow
+  |-- short hosted provision job
+  |        `-- OpenTofu/Terraform -> temporary compute + one JIT registration
+  |-- heavy workload job -> one isolated VM
+  `-- short hosted cleanup job -> runner + cloud resources removed
+                              `-> independent TTL sweep is the backstop
 ```
 
 The JIT configuration is never placed in cloud-init, infrastructure state, or workflow artifacts. The runner package is resolved from the latest official GitHub release and its published SHA-256 digest is verified before extraction.
@@ -55,23 +48,25 @@ Need concurrent jobs or an always-on controller? See [Operate the controller](do
 
 | Mode | GitHub-hosted minutes | Best for | Trade-off |
 | --- | ---: | --- | --- |
-| External controller | 0 | Tight Actions budgets and normal operation | Needs a small always-on controller host |
-| Workflow provision/cleanup actions | Two hosted control jobs plus the workload | Evaluation and simple integrations | Still depends on GitHub-hosted jobs and artifact handoff |
+| GitHub control jobs | Two short hosted jobs; self-hosted workload is not a hosted job | Current recommended integration | Hosted jobs are rounded and require a short-lived state artifact |
+| External polling controller | 0 | Compatibility and constrained accounts | Needs a trusted always-on controller host |
+| Serverless webhook controller | No hosted provision/cleanup jobs | Planned event-driven operation | Architecture accepted; implementation is not released yet |
 
-The external controller is the recommended mode when the account cannot start GitHub-hosted jobs.
+The GitHub control-job mode is the current recommended path. The provider-agnostic serverless design keeps it as a fallback adapter rather than removing it.
 
 ## Requirements
 
-Controller host:
+Control plane:
 
-- Linux or macOS with `bash`, `curl`, `jq`, `ssh`, and `ssh-keygen`
+- GitHub Actions control jobs, or Linux/macOS for the compatibility polling controller
+- `bash`, `curl`, `jq`, `ssh`, and `ssh-keygen`
 - OpenTofu 1.7+ (recommended) or Terraform 1.7+
 - a dedicated Hetzner Cloud project token
 - a GitHub fine-grained token scoped to the target repositories with **Actions: read** and **Administration: write**
 
 The normal workflow `GITHUB_TOKEN` usually cannot generate repository JIT configurations. Keep runner administration credentials separate from application and deployment secrets.
 
-## Quickstart: zero hosted minutes
+## External polling controller compatibility mode
 
 1. Clone the controller onto a trusted host:
 
@@ -121,15 +116,7 @@ Set `max_runners` above `1` to run multiple jobs concurrently. Every active job 
 
 If GitHub-hosted control jobs are available, the composite actions can provision and destroy a runner from a workflow. Pin the toolkit to an immutable release tag or commit SHA in production.
 
-While this repository is private, allow other private repositories owned by the same account to use its actions:
-
-```bash
-gh api --method PUT \
-  repos/OWNER/jit-runner-kit/actions/permissions/access \
-  -f access_level=user
-```
-
-This shares action code, not caller secrets. The full three-job example and the separate sweeper are in [`examples/github-actions.yml`](examples/github-actions.yml) and [`examples/ttl-sweeper.yml`](examples/ttl-sweeper.yml).
+The full three-job example and the separate sweeper are in [`examples/github-actions.yml`](examples/github-actions.yml) and [`examples/ttl-sweeper.yml`](examples/ttl-sweeper.yml). The provision and cleanup jobs must not check out or execute untrusted application code. Set artifact retention to the shortest practical period; the state contains resource metadata but never the JIT configuration or private SSH key.
 
 The actions use OpenTofu by default. Set `iac-engine: terraform` on both `provision` and `destroy` if Terraform is required.
 
@@ -163,7 +150,7 @@ bin/jit-runner sweep
 - Infrastructure state contains cloud resource metadata and an SSH public key, but no private key or JIT configuration.
 - `if: always()` is not a cleanup guarantee. Run the TTL sweep independently.
 - Ephemeral logs disappear with the VM. Forward diagnostics before using this for high-value releases.
-- The polling controller is intentionally simple. A webhook-driven, horizontally safe controller is on the roadmap.
+- The polling controller is intentionally simple. The accepted webhook/serverless architecture is documented in [Serverless controller architecture](docs/serverless-controller-architecture.md).
 
 Read the full [security policy](SECURITY.md) before operating the toolkit.
 
