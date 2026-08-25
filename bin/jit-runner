@@ -114,8 +114,8 @@ iac_apply_with_retry() {
     if (( ${#locations[@]} > 0 )); then
       selected_location="${locations[$(( (attempt - 1) % ${#locations[@]} ))]}"
       for argument_index in "${!attempt_args[@]}"; do
-        if [[ "${attempt_args[$argument_index]}" == -var=location=* ]]; then
-          attempt_args[$argument_index]="-var=location=${selected_location}"
+        if [[ "${attempt_args[argument_index]}" == -var=location=* ]]; then
+          attempt_args[argument_index]="-var=location=${selected_location}"
         fi
       done
       if (( attempt > 1 )); then
