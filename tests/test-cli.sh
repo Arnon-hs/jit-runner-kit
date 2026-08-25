@@ -48,7 +48,7 @@ esac
 MOCK_CURL
 chmod +x "$TEST_TMP/bin/curl"
 
-sweep_output="$(PATH="$TEST_TMP/bin:$PATH" HCLOUD_TOKEN=test "$CLI" sweep --dry-run)"
+sweep_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" sweep --dry-run)"
 [[ "$sweep_output" == "would-delete servers/101" ]]
 [[ "$sweep_output" != *"102"* ]]
 [[ "$sweep_output" != *"103"* ]]
@@ -59,7 +59,7 @@ cat >"$TEST_TMP/controller.json" <<EOF
   "state_root": "$TEST_TMP/controller-state"
 }
 EOF
-controller_output="$(PATH="$TEST_TMP/bin:$PATH" JIT_RUNNER_GITHUB_TOKEN=test \
+controller_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' JIT_RUNNER_GITHUB_TOKEN=test \
   "$CONTROLLER" --config "$TEST_TMP/controller.json" --once --dry-run)"
 [[ "$controller_output" == "would-provision repository=owner/repository job=999 label=jit-runner" ]]
 
