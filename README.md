@@ -111,7 +111,7 @@ The normal workflow `GITHUB_TOKEN` usually cannot generate repository JIT config
          - run: ./your-ci-command
    ```
 
-The controller polls only configured repositories and reacts only to queued jobs containing its trigger label. It creates one VM per job, waits for the JIT runner to deregister or reach its TTL, then deletes the GitHub runner record and cloud resources. See [`examples/controller-config.json`](examples/controller-config.json) and [`examples/zero-hosted-minutes.yml`](examples/zero-hosted-minutes.yml).
+The controller polls only configured repositories and reacts only to queued jobs containing its trigger label. It creates one VM per job, waits for the JIT runner to deregister or reach its TTL, then deletes the GitHub runner record and cloud resources. GitHub JIT-configuration throttling is retried according to GitHub's rate-limit response; the request runs before cloud provisioning so an API rejection does not create a billable VM. See [`examples/controller-config.json`](examples/controller-config.json) and [`examples/zero-hosted-minutes.yml`](examples/zero-hosted-minutes.yml).
 
 ## GitHub Actions control-job mode
 

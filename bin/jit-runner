@@ -117,6 +117,74 @@ github_request() {
     "${GITHUB_API_URL}/${endpoint}"
 }
 
+github_jit_request() {
+  local endpoint="$1"
+  local payload="$2"
+  local attempt=1
+  local max_attempts=4
+  local response body status curl_status message retry_after remaining reset_at delay now
+  local headers
+  headers="$(mktemp)"
+
+  while (( attempt <= max_attempts )); do
+    : >"$headers"
+    set +e
+    response="$(curl --silent --show-error \
+      --request POST \
+      --dump-header "$headers" \
+      --write-out $'\n%{http_code}' \
+      --header 'Accept: application/vnd.github+json' \
+      --header "Authorization: Bearer ${JIT_RUNNER_GITHUB_TOKEN}" \
+      --header "X-GitHub-Api-Version: ${GITHUB_API_VERSION}" \
+      --header 'Content-Type: application/json' \
+      --data "$payload" \
+      "${GITHUB_API_URL}/${endpoint}")"
+    curl_status=$?
+    set -e
+
+    status="${response##*$'\n'}"
+    body="${response%$'\n'*}"
+    if (( curl_status == 0 )) && [[ "$status" == 201 ]]; then
+      rm -f "$headers"
+      printf '%s' "$body"
+      return 0
+    fi
+
+    message="$(jq -r '.message // empty' <<<"$body" 2>/dev/null || true)"
+    retry_after="$(awk -F': *' 'tolower($1) == "retry-after" { gsub("\\r", "", $2); value=$2 } END { print value }' "$headers")"
+    remaining="$(awk -F': *' 'tolower($1) == "x-ratelimit-remaining" { gsub("\\r", "", $2); value=$2 } END { print value }' "$headers")"
+    reset_at="$(awk -F': *' 'tolower($1) == "x-ratelimit-reset" { gsub("\\r", "", $2); value=$2 } END { print value }' "$headers")"
+    delay=0
+
+    if (( curl_status != 0 )) || [[ "$status" == 502 || "$status" == 503 || "$status" == 504 ]]; then
+      delay=$((5 * attempt))
+    elif [[ "$status" == 403 || "$status" == 429 ]]; then
+      if [[ "$retry_after" =~ ^[0-9]+$ ]]; then
+        delay="$retry_after"
+      elif [[ "$remaining" == 0 && "$reset_at" =~ ^[0-9]+$ ]]; then
+        now="$(date +%s)"
+        delay=$((reset_at > now ? reset_at - now : 1))
+      elif [[ "$message" =~ [Rr]ate[[:space:]]limit|[Aa]buse ]]; then
+        delay=$((60 * (2 ** (attempt - 1))))
+      fi
+    elif [[ "$status" == 422 && "$message" =~ [Ss]pammed ]]; then
+      delay=$((60 * (2 ** (attempt - 1))))
+    fi
+
+    if (( delay <= 0 || attempt == max_attempts )); then
+      rm -f "$headers"
+      die "GitHub JIT configuration request failed with HTTP ${status:-unknown}: ${message:-no API message}"
+    fi
+    printf 'warning: GitHub JIT configuration request was throttled or unavailable; retrying in %s seconds (attempt %s/%s)\n' \
+      "$delay" "$attempt" "$max_attempts" >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+  done
+
+  rm -f "$headers"
+  die "GitHub JIT configuration request failed"
+}
+
 resolve_runner_asset() {
   local architecture="$1"
   local asset_name release_json digest
@@ -150,7 +218,7 @@ generate_jit_config() {
     --argjson group "$runner_group_id" \
     --argjson labels "$labels_json" \
     '{name: $name, runner_group_id: $group, labels: $labels, work_folder: "_work"}')"
-  response="$(github_request POST "repos/${repository}/actions/runners/generate-jitconfig" --data "$payload")"
+  response="$(github_jit_request "repos/${repository}/actions/runners/generate-jitconfig" "$payload")"
   JIT_CONFIG="$(jq -r '.encoded_jit_config // empty' <<<"$response")"
   GITHUB_RUNNER_ID="$(jq -r '.runner.id // empty' <<<"$response")"
   [[ -n "$JIT_CONFIG" && -n "$GITHUB_RUNNER_ID" ]] || die "GitHub did not return a JIT configuration"
@@ -294,6 +362,9 @@ cmd_provision() {
   expires_at="$(( $(date +%s) + ttl_minutes * 60 ))"
   trap 'cleanup_failed_provision "$?" "$state_dir" "$run_key" "$key_file" "$repository"' EXIT
 
+  resolve_runner_asset "$architecture"
+  generate_jit_config "$repository" "$runner_name" "$runner_label" "$architecture" "$runner_group_id" "$extra_labels"
+
   if [[ -z "$ssh_allowed_cidr" ]]; then
     controller_ip="$(curl -4fsS https://api.ipify.org)"
     [[ "$controller_ip" =~ ^[0-9.]+$ ]] || die "could not detect controller IPv4; pass --ssh-allowed-cidr"
@@ -332,9 +403,6 @@ cmd_provision() {
   wait_for_ssh "$public_ip" "$key_file"
   ssh -i "$key_file" -o BatchMode=yes -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null "root@${public_ip}" cloud-init status --wait >/dev/null
-
-  resolve_runner_asset "$architecture"
-  generate_jit_config "$repository" "$runner_name" "$runner_label" "$architecture" "$runner_group_id" "$extra_labels"
 
   {
     printf '%s\n%s\n%s\n' "$JIT_CONFIG" "$RUNNER_ASSET_URL" "$RUNNER_ASSET_SHA256"
