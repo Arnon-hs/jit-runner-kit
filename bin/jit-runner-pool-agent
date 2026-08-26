@@ -134,13 +134,18 @@ run_claim() {
     --name "$dind_name" \
     --network "$network_name" \
     --network-alias docker \
+    --env DOCKER_TLS_CERTDIR= \
     --memory "$JIT_POOL_DIND_MEMORY" \
     --label jit-runner-kit=pool \
     --label "jit-runner-kit.job=${job_key}" \
     "$JIT_POOL_DIND_IMAGE" --tls=false >/dev/null
 
   for attempt in {1..30}; do
-    if docker exec "$dind_name" docker info >/dev/null 2>&1; then
+    if docker run --rm \
+      --network "$network_name" \
+      --entrypoint docker \
+      "$JIT_POOL_DIND_IMAGE" \
+      --host=tcp://docker:2375 info >/dev/null 2>&1; then
       break
     fi
     if [[ "$attempt" == 30 ]]; then

@@ -43,6 +43,15 @@ write_line="$(grep -nF "printf '%s' \"\$encoded_jit_config\" >\"${EXPECTED_JIT_C
 chmod_line="$(grep -nF "chmod 600 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT" | cut -d: -f1)"
 chown_line="$(grep -nF "chown 1001:1001 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT" | cut -d: -f1)"
 ((write_line < chmod_line && chmod_line < chown_line))
+grep -Fq -- '--env DOCKER_TLS_CERTDIR=' "$POOL_AGENT"
+grep -Fq -- '--entrypoint docker' "$POOL_AGENT"
+grep -Fq -- '--host=tcp://docker:2375 info' "$POOL_AGENT"
+# Match the pool agent's source literally rather than expanding its variable here.
+# shellcheck disable=SC2016
+if grep -Fq 'docker exec "$dind_name" docker info' "$POOL_AGENT"; then
+  printf 'pool readiness must not rely on the DinD Unix socket\n' >&2
+  exit 1
+fi
 
 if command -v docker >/dev/null; then
   PERMISSION_TEST_VOLUME="jit-runner-kit-permissions-$$"
@@ -69,6 +78,133 @@ pool_limit_status=$?
 set -e
 [[ $pool_limit_status -ne 0 ]]
 [[ "$pool_limit_output" == *"JIT_POOL_MAX_RUNNERS must not exceed 2"* ]]
+
+mkdir -p "$TEST_TMP/pool-bin"
+cat >"$TEST_TMP/pool-bin/curl" <<'MOCK_POOL_CURL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+output_file=""
+url=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      output_file="$2"
+      shift 2
+      ;;
+    --write-out)
+      shift 2
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+[[ "$url" == */v1/pool/claim ]]
+claim_count=0
+if [[ -r "$MOCK_POOL_CLAIM_COUNT" ]]; then
+  claim_count="$(<"$MOCK_POOL_CLAIM_COUNT")"
+fi
+claim_count=$((claim_count + 1))
+printf '%s' "$claim_count" >"$MOCK_POOL_CLAIM_COUNT"
+if [[ "$claim_count" == 1 ]]; then
+  printf '{"job_key":"job-4242","encoded_jit_config":"synthetic-jit-config","expires_at":4102444800}' >"$output_file"
+  printf '200'
+else
+  : >"$output_file"
+  printf '204'
+fi
+MOCK_POOL_CURL
+chmod +x "$TEST_TMP/pool-bin/curl"
+cat >"$TEST_TMP/pool-bin/docker" <<'MOCK_POOL_DOCKER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf '%q ' "$@" >>"$MOCK_POOL_DOCKER_LOG"
+printf '\n' >>"$MOCK_POOL_DOCKER_LOG"
+case "${1:-} ${2:-}" in
+  "ps --all"|"network ls") exit 0 ;;
+  "network create") printf 'synthetic-network\n'; exit 0 ;;
+  "network rm"|"rm --force") exit 0 ;;
+esac
+if [[ "${1:-}" == exec ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == run ]]; then
+  if [[ " $* " == *" --detach "* ]]; then
+    printf 'synthetic-dind\n'
+    exit 0
+  fi
+  if [[ " $* " == *" --entrypoint docker "* ]]; then
+    [[ "$MOCK_POOL_NETWORK_READY" == true ]]
+    exit
+  fi
+  exit 0
+fi
+exit 0
+MOCK_POOL_DOCKER
+chmod +x "$TEST_TMP/pool-bin/docker"
+cat >"$TEST_TMP/pool-bin/sleep" <<'MOCK_POOL_SLEEP'
+#!/usr/bin/env bash
+exit 0
+MOCK_POOL_SLEEP
+chmod +x "$TEST_TMP/pool-bin/sleep"
+cat >"$TEST_TMP/pool-bin/timeout" <<'MOCK_POOL_TIMEOUT'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+while [[ "${1:-}" == --* ]]; do
+  shift
+done
+shift
+exec "$@"
+MOCK_POOL_TIMEOUT
+chmod +x "$TEST_TMP/pool-bin/timeout"
+
+run_pool_agent_case() {
+  local case_name="$1"
+  local network_ready="$2"
+  local case_root="$TEST_TMP/pool-${case_name}"
+  local output_file="$case_root/stdout"
+  local error_file="$case_root/stderr"
+  local status
+  mkdir -p "$case_root/state/jobs"
+  set +e
+  PATH="$TEST_TMP/pool-bin:$PATH" \
+    MOCK_POOL_CLAIM_COUNT="$case_root/claim-count" \
+    MOCK_POOL_DOCKER_LOG="$case_root/docker.log" \
+    MOCK_POOL_NETWORK_READY="$network_ready" \
+    JIT_POOL_CONTROLLER_URL=https://controller.example.test \
+    JIT_POOL_HOST_TOKEN=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+    JIT_POOL_MAX_RUNNERS=1 \
+    JIT_POOL_STATE_ROOT="$case_root/state" \
+    JIT_POOL_RUNNER_IMAGE=runner:test \
+    JIT_POOL_DIND_IMAGE=dind:test \
+    "$POOL_AGENT" --once >"$output_file" 2>"$error_file"
+  status=$?
+  set -e
+  [[ "$status" == 10 ]]
+  grep -Fq -- '--env DOCKER_TLS_CERTDIR=' "$case_root/docker.log"
+  grep -Fq -- '--network jrk-4242 --entrypoint docker dind:test --host=tcp://docker:2375 info' \
+    "$case_root/docker.log"
+  if grep -Eq '^exec ' "$case_root/docker.log"; then
+    printf 'pool readiness unexpectedly used docker exec\n' >&2
+    exit 1
+  fi
+  grep -Fq -- 'rm --force jrk-runner-4242' "$case_root/docker.log"
+  grep -Fq -- 'rm --force jrk-dind-4242' "$case_root/docker.log"
+  grep -Fq -- 'network rm jrk-4242' "$case_root/docker.log"
+  [[ ! -e "$case_root/state/jobs/job-4242" ]]
+}
+
+run_pool_agent_case ready true
+grep -Fq -- 'runner:test' "$TEST_TMP/pool-ready/docker.log"
+grep -Fq -- 'job=job-4242 phase=runner result=started' "$TEST_TMP/pool-ready/stdout"
+
+run_pool_agent_case unreachable false
+if grep -Fq -- 'runner:test' "$TEST_TMP/pool-unreachable/docker.log"; then
+  printf 'runner started before network Docker readiness\n' >&2
+  exit 1
+fi
+grep -Fq -- 'job=job-4242 phase=dind-ready result=failed' "$TEST_TMP/pool-unreachable/stderr"
 
 set +e
 invalid_output="$($CLI provision --repository 'not a repository' 2>&1)"
