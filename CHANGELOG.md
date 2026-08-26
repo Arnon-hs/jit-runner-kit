@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-27
+
+### Fixed
+
+- Elastic Hetzner pool hosts now use a short-lived public-only bootstrap SSH-key object so Hetzner does not generate or email a root password for every scale-to-zero host. The adapter retains it through the asynchronous server-create action, deletes it only after provider-observed completion, and includes it in orphan cleanup, while the one-host invariant, deny-inbound firewall, disabled SSH service, and final zero-resource inventory remain unchanged.
+
+### Changed
+
+- The Cloudflare pool template now keeps an idle host reusable for 45 minutes. This fits typical short jobs inside Hetzner's minimum one-hour lifecycle charge and avoids paying another rounded hour when nearby repository releases arrive after the former 10-minute window.
+
 ## [0.3.0] - 2026-08-26
 
 ### Added
@@ -89,7 +99,8 @@ All notable changes to this project are documented in this file. The format is b
 - Per-run ownership labels, rollback-safe provisioning, runner-record deletion, and two-path cleanup limit orphaned resources.
 - Official GitHub runner archives are verified against their published SHA-256 digest.
 
-[Unreleased]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Arnon-hs/jit-runner-kit/releases/tag/v0.1.0

@@ -1,6 +1,6 @@
 # Deploy the Cloudflare controller
 
-Status: v0.3.0 pre-1.0 production pilot. The adapter has completed the live-cloud gates below on Hetzner CX33 and is running trusted main-branch release workflows in multiple private repositories. Every independent installation must repeat the gates before production use.
+Status: v0.3.1 pre-1.0 production pilot. The adapter has completed the live-cloud gates below on Hetzner CX33 and is running trusted main-branch release workflows in multiple private repositories. Every independent installation must repeat the gates before production use.
 
 ## What this adapter owns
 
@@ -10,7 +10,7 @@ GitHub workflow_job webhook
   -> repository-scoped App, or private organization runner group
   -> Cloudflare Queue
   -> singleton SQLite Durable Object (job CAS + global leases)
-  -> Hetzner API (at most one deny-inbound pool host, no SSH)
+  -> Hetzner API (at most one deny-inbound pool host, no usable SSH access)
   -> source-bound one-time host enrollment
   -> GitHub App JIT configuration per claimed job
   -> at most two disposable runner/DinD pairs
@@ -98,9 +98,10 @@ Edit the ignored `packages/adapter-controller-cloudflare/wrangler.canary.jsonc`:
 - keep `RUN_LABEL_PREFIX` non-empty and route jobs with `jit-run-${{ github.run_id }}` as defense in depth;
 - keep `MAX_RUNNERS` at `1` for the first canary, then at most `2` initially;
 - set `COMPUTE_MODE=hetzner-pool` and a unique, stable `POOL_ID` for this deployment;
-- set `POOL_IDLE_SECONDS=600` (accepted range 300-3600);
+- set `POOL_IDLE_SECONDS=2700` for the cost-optimized short-job profile (accepted range 300-3600); Hetzner rounds each server lifecycle up to one hour, so choose a value that keeps normal job duration plus idle reuse below that first hour;
 - set `POOL_AGENT_URL` to the pool agent at an immutable Git commit and `POOL_AGENT_SHA256` to its exact SHA-256;
 - set `POOL_RUNNER_IMAGE` and `POOL_DIND_IMAGE` to full registry references pinned with `@sha256:` digests;
+- set `POOL_BOOTSTRAP_SSH_PUBLIC_KEY` to a dedicated Ed25519 public key whose private half has been destroyed and is not backed up; the adapter creates a labeled temporary Hetzner key, passes it to server creation to suppress root-password email, then deletes the key object;
 - keep `PROVISIONING_TIMEOUT_SECONDS` long enough for normal API calls (the default is 300); stale attempts are claimed again after this window;
 - set `PUBLIC_BASE_URL` to the final HTTPS Worker or custom-domain origin;
 - select a Hetzner server type, location, image, architecture, and TTL.
@@ -156,8 +157,8 @@ The webhook payload labels become the JIT runner labels. Labels are visible to r
 - The Durable Object stores only a SHA-256 digest of the bootstrap token.
 - Bootstrap also requires the request's observed public IPv4 to equal the created VM's IPv4.
 - JIT configuration is generated only after successful bootstrap verification and an atomic state claim, returned once with `Cache-Control: no-store`, and never written to durable state.
-- The pool host has no SSH key and a firewall with no inbound rules. It needs outbound HTTPS for Cloudflare, GitHub, Ubuntu, registries, and workload dependencies.
-- Pool discovery and cleanup use an explicit `pool_id` label. A retryable create response performs bounded label recovery and blocks a second create while the first result is ambiguous. Primary IPv4 provisioning waits on the Hetzner action returned by `POST /primary_ips` through the generic `GET /actions/{id}` endpoint before the server may reference that IP.
+- The pool host has no usable SSH credential and a firewall with no inbound rules. A public-only bootstrap key is briefly registered with Hetzner solely to prevent generation and email of a root password; no private key is retained, the project key is deleted after server creation, and cloud-init disables SSH. The host needs outbound HTTPS for Cloudflare, GitHub, Ubuntu, registries, and workload dependencies.
+- Pool discovery and cleanup use an explicit `pool_id` label. A retryable create response performs bounded label recovery and blocks a second create while the first result is ambiguous. Primary IPv4 provisioning and server creation both wait on the actions returned by Hetzner through the generic `GET /actions/{id}` endpoint; the temporary SSH-key object is not removed until server creation is provider-observed as complete.
 - One Durable Object operation gate serializes queue, bootstrap, claim, release, alarm, and provider mutations.
 - GitHub installation tokens are minted per operation and scoped to the webhook repository ID.
 
@@ -170,14 +171,14 @@ Run these in a dedicated Hetzner project and a non-production GitHub repository:
 1. Valid signed queued event provisions exactly one pool VM and one runner container.
 2. Duplicate webhook delivery, concurrent queue delivery, and ambiguous provider response do not provision a second VM.
 3. Wrong repository, event, source repository, branch, workflow path/ref, organization-scope group policy, ambiguous job set, missing static/run-scoped label, PR association, signature, token, and source IP create no compute.
-4. Two concurrent accepted runs use one VM and no more than two isolated runner/DinD pairs; no per-job server, IPv4, firewall, or SSH key is created.
+4. Two concurrent accepted runs use one VM and no more than two isolated runner/DinD pairs; no per-job server, IPv4, or firewall is created, and the single temporary bootstrap SSH-key object is deleted after host creation.
 5. Successful workload removes the JIT record and job containers; the idle window then removes the host, Primary IPv4, and firewall.
 6. Intentionally failed workload performs the same job and idle cleanup.
 7. Cancelled workflow is cleaned by completed delivery or TTL reconciliation, including cancellation before host enrollment.
 8. A forced retry reaches the Queue retry path; an exhausted synthetic task reaches the DLQ without leaking secrets.
 9. A deliberately orphaned expired labeled resource is removed by Cron/provider reconciliation.
 10. The existing GitHub control-job fallback still passes without being invoked by the new workflow.
-11. After the 10-15 minute idle observation, `bin/jit-runner inventory --require-empty` reports zero `ephemeral_*` and `pool_*` resources.
+11. After `POOL_IDLE_SECONDS`, the next cleanup reconciliation, and provider eventual consistency, `bin/jit-runner inventory --require-empty` reports zero `ephemeral_*` and `pool_*` resources.
 12. A workflow outside `TRUSTED_WORKFLOWS` cannot acquire a runner even if it copies all runner labels; organization scope also proves the same through the runner-group policy.
 
 Until all gates pass for your installation, keep production workflows on the GitHub control-job adapter. After they pass, follow [Production cutover](production-cutover.md) and retain the old adapter only as an explicit rollback path.

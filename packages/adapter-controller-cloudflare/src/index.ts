@@ -37,6 +37,7 @@ export interface Env {
   POOL_AGENT_SHA256?: string;
   POOL_RUNNER_IMAGE?: string;
   POOL_DIND_IMAGE?: string;
+  POOL_BOOTSTRAP_SSH_PUBLIC_KEY?: string;
   POOL_IDLE_SECONDS?: string;
   POOL_ID?: string;
   ALLOWED_REPOSITORIES: string;
@@ -59,7 +60,7 @@ const BOOTSTRAP_AUTHORIZATION = /^Bearer [A-Za-z0-9_-]{43}$/;
 const POOL_CLAIM_PATH = "/v1/pool/claim";
 const POOL_ENROLL_PATH = "/v1/pool/enroll";
 const POOL_RELEASE_PATH = "/v1/pool/release";
-export const controllerVersion = "0.3.0";
+export const controllerVersion = "0.3.1";
 
 interface LeaseRecord {
   holder: string;
@@ -532,6 +533,7 @@ function computeProvider(env: Env): HetznerComputeProvider | SharedHostComputePr
       agentSha256: required(env.POOL_AGENT_SHA256, "POOL_AGENT_SHA256"),
       runnerImage: required(env.POOL_RUNNER_IMAGE, "POOL_RUNNER_IMAGE"),
       dindImage: required(env.POOL_DIND_IMAGE, "POOL_DIND_IMAGE"),
+      bootstrapSshPublicKey: required(env.POOL_BOOTSTRAP_SSH_PUBLIC_KEY, "POOL_BOOTSTRAP_SSH_PUBLIC_KEY"),
       enrollmentToken: required(env.POOL_ENROLLMENT_TOKEN, "POOL_ENROLLMENT_TOKEN"),
       poolId: required(env.POOL_ID, "POOL_ID"),
       maxRunners: boundedInteger(env.MAX_RUNNERS, "MAX_RUNNERS", 1, 2),
