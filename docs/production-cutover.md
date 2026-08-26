@@ -87,9 +87,12 @@ The published pool runner image includes Node.js, Docker CLI/Compose, GitHub CLI
 4. Publish one consolidated, ready-for-review PR. Do not create a draft if your repository intentionally runs checks and automerge only for ready PRs.
 5. Merge the unchanged reviewed head once.
 6. Let the resulting `push` create the single release run. Do not also dispatch it manually.
-7. If GitHub conclusively creates no push run, record that absence and authorize exactly one `workflow_dispatch`; check again for duplicates immediately before dispatch.
+7. Treat an exact-SHA GitHub `PushEvent` as evidence that the automatic run can still arrive, even when the Actions API and check suites are temporarily empty. Do **not** use `workflow_dispatch` for that SHA while the push event exists.
+8. Use `workflow_dispatch` only when the release intentionally has no corresponding push event, or after the push-trigger defect has been fixed in a separate reviewed change. Record the exact SHA and recheck runs, check suites, and repository runners immediately before dispatch.
 
 Treat re-enabling the old provision/destroy workflow as an explicit rollback. Never leave both flows able to release the same SHA.
+
+GitHub event-to-Actions scheduling can be delayed. A fixed ten-minute or similar observation window is not a deduplication primitive. If a repository needs an automatic fallback, implement a durable repository-and-SHA release claim outside the workload before enabling it; do not approximate that claim with a timer.
 
 ## 5. Prove application and cleanup outcomes separately
 
@@ -109,6 +112,7 @@ A green workflow does not replace runtime or cleanup proof. A generic deployment
 
 - Keep one release workflow per repository and one substantial job per run.
 - Consolidate PR updates before pushing; avoid duplicate `push`, `pull_request`, and manual triggers for the same work.
+- Never convert a delayed exact-SHA push into a manual release merely because the Actions API is temporarily empty.
 - Use `MAX_RUNNERS=2` only when concurrent jobs materially shorten a burst. Each runner still accepts one job.
 - Keep the recommended 600-second idle window so adjacent jobs can reuse one minimum-billed host hour without paying for an always-on server.
 - Keep the steady idle target at zero provider resources. A powered-off Hetzner server is still billable.

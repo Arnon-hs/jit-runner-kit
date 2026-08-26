@@ -23,6 +23,7 @@ All notable changes to this project are documented in this file. The format is b
 - Cloudflare preflight now validates repository or organization scope, trusted non-PR events, scope-specific App permissions, and the Rate Limit binding.
 - Compatibility polling now fails closed unless event, source repository, branch, pinned workflow path, run-scoped label, and a single eligible queued job all match.
 - Examples remove pull-request triggers from privileged JIT paths, disable persisted checkout credentials, and pin toolkit actions to a full commit SHA.
+- Production cutover guidance treats an observed exact-SHA push event as pending release authority and forbids timer-based manual fallback for the same SHA.
 
 ### Fixed
 
