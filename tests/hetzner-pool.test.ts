@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ComputeCreateRequest } from "../packages/contracts/src/index";
-import { TerminalError } from "../packages/contracts/src/index";
+import { RetryableError, TerminalError } from "../packages/contracts/src/index";
 import { HetznerPoolComputeProvider } from "../packages/adapter-compute-hetzner-pool/src/index";
 
 const dind = `docker:27-dind@sha256:${"a".repeat(64)}`;
@@ -132,6 +132,108 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(api.servers).toHaveLength(1);
   });
 
+  it("waits for the Primary IP action before creating a server", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.primaryIpActionStatuses = ["running", "running", "success"];
+    let now = 0;
+    const sleeps: number[] = [];
+    const provider = createProvider(api.fetch, "canary", {
+      now: () => now,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        now += milliseconds;
+      },
+    });
+
+    await expect(provider.create(request("job-101"))).resolves.toMatchObject({ serverId: "11" });
+
+    expect(api.actionReads).toBe(2);
+    expect(api.serverCreateActionStatuses).toEqual(["success"]);
+    expect(sleeps).toEqual([250, 500]);
+  });
+
+  it("bounds a still-running Primary IP action without deleting ambiguous resources", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.primaryIpActionStatuses = ["running"];
+    let now = 0;
+    const provider = createProvider(api.fetch, "canary", {
+      now: () => now,
+      sleep: async (milliseconds) => { now += milliseconds; },
+    });
+
+    await expect(provider.create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+
+    expect(now).toBe(30_000);
+    expect(api.serverCreates).toBe(0);
+    expect(api.deletes).toEqual([]);
+    expect(api.firewalls).toHaveLength(1);
+    expect(api.ips).toHaveLength(1);
+  });
+
+  it("preserves ambiguous resources when the Primary IP action cannot be observed", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.primaryIpActionStatuses = ["running"];
+    api.actionReadFailure = { code: "unavailable", message: "temporary API outage" };
+    let now = 0;
+
+    await expect(createProvider(api.fetch, "canary", {
+      now: () => now,
+      sleep: async (milliseconds) => { now += milliseconds; },
+    }).create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+
+    expect(api.serverCreates).toBe(0);
+    expect(api.deletes).toEqual([]);
+    expect(api.firewalls).toHaveLength(1);
+    expect(api.ips).toHaveLength(1);
+  });
+
+  it("cleans a terminal Primary IP action and emits only safe error telemetry", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.primaryIpActionStatuses = ["running", "error"];
+    api.primaryIpActionError = { code: "invalid_input", message: "sensitive provider detail" };
+    let now = 0;
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "info").mockImplementation((value) => logs.push(String(value)));
+
+    try {
+      await expect(createProvider(api.fetch, "canary", {
+        now: () => now,
+        sleep: async (milliseconds) => { now += milliseconds; },
+      }).create(request("job-101"))).rejects.toBeInstanceOf(TerminalError);
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(api.serverCreates).toBe(0);
+    expect(api.deletes).toEqual(["primary_ips/31", "firewalls/21"]);
+    expect(logs.join("\n")).toContain('"operation":"primary_ip.create"');
+    expect(logs.join("\n")).toContain('"errorCode":"invalid_input"');
+    expect(logs.join("\n")).not.toContain("sensitive provider detail");
+    expect(logs.join("\n")).not.toContain("test-token");
+  });
+
+  it("maps a resource-unavailable Primary IP action to a retryable failure and cleans it", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.primaryIpActionStatuses = ["error"];
+    api.primaryIpActionError = { code: "resource_unavailable", message: "try another moment" };
+
+    await expect(createProvider(api.fetch).create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+
+    expect(api.serverCreates).toBe(0);
+    expect(api.deletes).toEqual(["primary_ips/31", "firewalls/21"]);
+  });
+
+  it("maps an HTTP 412 provider precondition failure to a retryable create", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.serverCreateFailure = { status: 412, code: "resource_unavailable", message: "capacity is warming" };
+
+    await expect(createProvider(api.fetch).create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+
+    expect(api.serverCreates).toBe(1);
+    expect(api.deletes).toEqual([]);
+    expect(api.servers).toHaveLength(0);
+  });
+
   it("scopes discovery and cleanup to one explicit pool id", async () => {
     const api = new FakeHetznerPoolApi();
     const canary = createProvider(api.fetch, "canary");
@@ -147,7 +249,14 @@ describe("elastic Hetzner pool compute adapter", () => {
   });
 });
 
-function createProvider(fetcher: typeof fetch, poolId = "canary"): HetznerPoolComputeProvider {
+function createProvider(
+  fetcher: typeof fetch,
+  poolId = "canary",
+  timing: {
+    sleep?: (milliseconds: number) => Promise<void>;
+    now?: () => number;
+  } = {},
+): HetznerPoolComputeProvider {
   return new HetznerPoolComputeProvider({
     token: "test-token",
     controllerUrl: "https://controller.example.test",
@@ -160,7 +269,7 @@ function createProvider(fetcher: typeof fetch, poolId = "canary"): HetznerPoolCo
     enrollmentToken: "e".repeat(43),
     poolId,
     apiUrl: "https://api.example.test/v1",
-  }, fetcher, async () => undefined);
+  }, fetcher, timing.sleep ?? (async () => undefined), timing.now ?? (() => Date.now()));
 }
 
 function request(jobKey: string): ComputeCreateRequest {
@@ -193,12 +302,19 @@ class FakeHetznerPoolApi {
   serverCreates = 0;
   firewallCreates = 0;
   primaryIpCreates = 0;
+  actionReads = 0;
   deletes: string[] = [];
   lastServerBody: Record<string, unknown> | undefined;
   loseFirstServerCreateResponse = false;
+  primaryIpActionStatuses: Array<"running" | "success" | "error"> = ["success"];
+  primaryIpActionError: { code: string; message: string } | null = null;
+  actionReadFailure: { code: string; message: string } | null = null;
+  serverCreateFailure: { status: number; code: string; message: string } | null = null;
+  serverCreateActionStatuses: Array<"running" | "success" | "error"> = [];
   private nextServerId = 11;
   private nextFirewallId = 21;
   private nextIpId = 31;
+  private actionStatusIndex = 0;
 
   readonly fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input));
@@ -214,6 +330,14 @@ class FakeHetznerPoolApi {
       if (path === "servers") return Response.json({ servers: scoped(this.servers) });
       if (path === "firewalls") return Response.json({ firewalls: scoped(this.firewalls) });
       if (path === "primary_ips") return Response.json({ primary_ips: scoped(this.ips) });
+      if (path === "actions/41") {
+        this.actionReads += 1;
+        if (this.actionReadFailure) {
+          return Response.json({ error: this.actionReadFailure }, { status: 503 });
+        }
+        this.actionStatusIndex = Math.min(this.actionStatusIndex + 1, this.primaryIpActionStatuses.length - 1);
+        return Response.json({ action: this.primaryIpAction() });
+      }
     }
     if (method === "POST" && path === "firewalls") {
       this.firewallCreates += 1;
@@ -228,11 +352,22 @@ class FakeHetznerPoolApi {
       const id = this.nextIpId++;
       const primaryIp = { id, ip: `192.0.2.${id - 21}`, labels: body.labels };
       this.ips.push(primaryIp);
-      return Response.json({ primary_ip: primaryIp }, { status: 201 });
+      return Response.json({ primary_ip: primaryIp, action: this.primaryIpAction() }, { status: 201 });
     }
     if (method === "POST" && path === "servers") {
       this.serverCreates += 1;
+      this.serverCreateActionStatuses.push(this.primaryIpAction().status);
       this.lastServerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (this.primaryIpAction().status !== "success") {
+        return Response.json({
+          error: { code: "invalid_input", message: "Primary IPv4 is not ready" },
+        }, { status: 422 });
+      }
+      if (this.serverCreateFailure) {
+        return Response.json({
+          error: { code: this.serverCreateFailure.code, message: this.serverCreateFailure.message },
+        }, { status: this.serverCreateFailure.status });
+      }
       const serverId = this.nextServerId++;
       const publicNet = this.lastServerBody.public_net as { ipv4: number };
       const primaryIp = this.ips.find((item) => item.id === publicNet.ipv4);
@@ -278,5 +413,14 @@ class FakeHetznerPoolApi {
     ip = "192.0.2.10",
   ) {
     return { id, labels, public_net: { ipv4: { id: ipId, ip } } };
+  }
+
+  private primaryIpAction() {
+    const status = this.primaryIpActionStatuses[this.actionStatusIndex] ?? "running";
+    return {
+      id: 41,
+      status,
+      error: status === "error" ? this.primaryIpActionError : null,
+    };
   }
 }

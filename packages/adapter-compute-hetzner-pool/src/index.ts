@@ -32,8 +32,36 @@ interface HetznerPrimaryIp {
   labels: Record<string, string>;
 }
 
+interface HetznerAction {
+  id: number;
+  status: "running" | "success" | "error";
+  error?: { code?: string; message?: string } | null;
+}
+
+interface HetznerApiError {
+  code: string;
+  message: string;
+}
+
 const ORPHAN_CREATION_GRACE_SECONDS = 300;
 const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
+const ACTION_WAIT_TIMEOUT_MS = 30_000;
+const ACTION_POLL_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const;
+const RETRYABLE_ERROR_CODES = new Set([
+  "bad_gateway",
+  "conflict",
+  "locked",
+  "maintenance",
+  "rate_limit_exceeded",
+  "resource_limit_exceeded",
+  "resource_unavailable",
+  "server_error",
+  "service_error",
+  "timeout",
+  "unavailable",
+]);
+
+class HetznerActionStillRunningError extends RetryableError {}
 
 /**
  * One elastic Hetzner host shared by a bounded number of disposable runner
@@ -48,6 +76,7 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     private readonly fetcher: typeof fetch = fetch,
     private readonly sleep: (milliseconds: number) => Promise<void> =
       (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    private readonly now: () => number = () => Date.now(),
   ) {
     this.apiUrl = config.apiUrl ?? "https://api.hetzner.cloud/v1";
     validateConfig(config);
@@ -80,14 +109,14 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
         Number(existingFirewall?.labels.created_at) || 0,
         Number(existingIp?.labels.created_at) || 0,
       );
-      if (createdAt + ORPHAN_CREATION_GRACE_SECONDS > Math.floor(Date.now() / 1000)) {
+      if (createdAt + ORPHAN_CREATION_GRACE_SECONDS > Math.floor(this.now() / 1000)) {
         throw new RetryableError("pool host creation outcome is still ambiguous", 30);
       }
       if (existingIp) await this.deleteId("primary_ips", existingIp.id);
       if (existingFirewall) await this.deleteId("firewalls", existingFirewall.id);
     }
 
-    const labels = poolLabels(this.config.poolId, expiresAt, request.repository, Math.floor(Date.now() / 1000));
+    const labels = poolLabels(this.config.poolId, expiresAt, request.repository, Math.floor(this.now() / 1000));
     const firewall = (
       await this.request<{ firewall: HetznerFirewall }>("/firewalls", {
         method: "POST",
@@ -96,9 +125,11 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     ).firewall;
 
     let primaryIp: HetznerPrimaryIp;
+    let primaryIpAction: HetznerAction | undefined;
     try {
-      primaryIp = (
-        await this.request<{ primary_ip: HetznerPrimaryIp }>("/primary_ips", {
+      const created = await this.request<{ primary_ip: HetznerPrimaryIp; action?: HetznerAction }>(
+        "/primary_ips",
+        {
           method: "POST",
           body: JSON.stringify({
             name: `jrk-${this.config.poolId}-ipv4`,
@@ -107,8 +138,10 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
             auto_delete: false,
             labels,
           }),
-        })
-      ).primary_ip;
+        },
+      );
+      primaryIp = created.primary_ip;
+      primaryIpAction = created.action;
     } catch (error) {
       if (error instanceof RetryableError) {
         const recovered = await this.recoverSinglePrimaryIp();
@@ -116,6 +149,18 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
         else throw new RetryableError("pool Primary IPv4 create outcome remains ambiguous", 30);
       } else {
         await this.deleteId("firewalls", firewall.id);
+        throw error;
+      }
+    }
+
+    if (primaryIpAction) {
+      try {
+        await this.waitForAction(primaryIpAction, "primary_ip.create");
+      } catch (error) {
+        if (!(error instanceof HetznerActionStillRunningError)) {
+          await this.deleteId("primary_ips", primaryIp.id);
+          await this.deleteId("firewalls", firewall.id);
+        }
         throw error;
       }
     }
@@ -258,6 +303,49 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     return undefined;
   }
 
+  private async waitForAction(initial: HetznerAction, operation: string): Promise<void> {
+    const deadline = this.now() + ACTION_WAIT_TIMEOUT_MS;
+    let action = initial;
+    let delayIndex = 0;
+    let lastStatus: HetznerAction["status"] | undefined;
+
+    while (true) {
+      if (action.status !== lastStatus) {
+        emitProviderTelemetry(operation, action.status, undefined, action.error?.code);
+        lastStatus = action.status;
+      }
+      if (action.status === "success") return;
+      if (action.status === "error") throw actionError(operation, action.error);
+
+      const remaining = deadline - this.now();
+      if (remaining <= 0) {
+        emitProviderTelemetry(operation, "timeout");
+        throw new HetznerActionStillRunningError(`Hetzner ${operation} action is still running`, 30);
+      }
+      const delay = Math.min(
+        ACTION_POLL_DELAYS_MS[Math.min(delayIndex, ACTION_POLL_DELAYS_MS.length - 1)]!,
+        remaining,
+      );
+      await this.sleep(delay);
+      delayIndex += 1;
+
+      const requestBudget = deadline - this.now();
+      if (requestBudget <= 0) continue;
+      try {
+        action = (
+          await this.request<{ action: HetznerAction }>(
+            `/actions/${action.id}`,
+            { method: "GET" },
+            false,
+            Math.min(PROVIDER_REQUEST_TIMEOUT_MS, requestBudget),
+          )
+        ).action;
+      } catch {
+        throw new HetznerActionStillRunningError(`Hetzner ${operation} action could not be observed`, 30);
+      }
+    }
+  }
+
   private async deleteHost(resource: ComputeResource): Promise<void> {
     const errors: unknown[] = [];
     for (const [kind, id] of [
@@ -303,26 +391,61 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     await this.request(`/${resource}/${id}`, { method: "DELETE" }, true);
   }
 
-  private async request<T = unknown>(path: string, init: RequestInit, allowMissing = false): Promise<T> {
+  private async request<T = unknown>(
+    path: string,
+    init: RequestInit,
+    allowMissing = false,
+    timeoutMs = PROVIDER_REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
     let response: Response;
     try {
       const fetcher = this.fetcher;
       response = await fetcher(`${this.apiUrl}${path}`, {
         ...init,
-        signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(Math.max(1, timeoutMs)),
         headers: { Authorization: `Bearer ${this.config.token}`, "Content-Type": "application/json" },
       });
     } catch {
+      emitProviderTelemetry(providerOperation(path, init.method), "transport_error");
       throw new RetryableError("Hetzner API transport failure", 30);
     }
     if (response.ok) return response.status === 204 ? undefined as T : await response.json() as T;
     if (allowMissing && response.status === 404) return undefined as T;
-    const body = await safeError(response);
-    if ([409, 423, 429].includes(response.status) || response.status >= 500) {
-      throw new RetryableError(`Hetzner API ${response.status}: ${body}`, 30);
+    const error = await safeError(response);
+    emitProviderTelemetry(providerOperation(path, init.method), "error", response.status, error.code);
+    if (isRetryableProviderError(response.status, error.code)) {
+      throw new RetryableError(`Hetzner API ${response.status}: ${error.message}`, 30);
     }
-    throw new TerminalError(`Hetzner API ${response.status}: ${body}`);
+    throw new TerminalError(`Hetzner API ${response.status}: ${error.message}`);
   }
+}
+
+function actionError(operation: string, error?: HetznerAction["error"]): Error {
+  const code = error?.code ?? "action_failed";
+  const message = error?.message ?? "action failed";
+  return RETRYABLE_ERROR_CODES.has(code)
+    ? new RetryableError(`Hetzner ${operation} action ${code}: ${message}`, 30)
+    : new TerminalError(`Hetzner ${operation} action ${code}: ${message}`);
+}
+
+function isRetryableProviderError(status: number, code: string): boolean {
+  return [409, 412, 423, 429].includes(status) || status >= 500 || RETRYABLE_ERROR_CODES.has(code);
+}
+
+function providerOperation(path: string, method = "GET"): string {
+  const normalized = path.split("?", 1)[0]!.replace(/\/\d+(?=\/|$)/g, "/:id");
+  return `${method.toUpperCase()} ${normalized}`;
+}
+
+function emitProviderTelemetry(operation: string, status: string, httpStatus?: number, errorCode?: string): void {
+  console.info(JSON.stringify({
+    level: "info",
+    event: "hetzner.operation",
+    operation,
+    status,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    ...(errorCode ? { errorCode } : {}),
+  }));
 }
 
 function validateConfig(config: HetznerPoolConfig): void {
@@ -460,9 +583,14 @@ function isImmutableImage(value: string): boolean {
   return /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[a-z0-9_.-]+)?@sha256:[a-f0-9]{64}$/i.test(value);
 }
 
-async function safeError(response: Response): Promise<string> {
+async function safeError(response: Response): Promise<HetznerApiError> {
   try {
     const body = await response.json() as { error?: { message?: string; code?: string } };
-    return body.error?.message ?? body.error?.code ?? "request failed";
-  } catch { return "request failed"; }
+    return {
+      code: body.error?.code ?? "unknown_error",
+      message: body.error?.message ?? body.error?.code ?? "request failed",
+    };
+  } catch {
+    return { code: "unknown_error", message: "request failed" };
+  }
 }

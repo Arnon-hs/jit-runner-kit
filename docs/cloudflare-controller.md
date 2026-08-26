@@ -157,7 +157,7 @@ The webhook payload labels become the JIT runner labels. Labels are visible to r
 - Bootstrap also requires the request's observed public IPv4 to equal the created VM's IPv4.
 - JIT configuration is generated only after successful bootstrap verification and an atomic state claim, returned once with `Cache-Control: no-store`, and never written to durable state.
 - The pool host has no SSH key and a firewall with no inbound rules. It needs outbound HTTPS for Cloudflare, GitHub, Ubuntu, registries, and workload dependencies.
-- Pool discovery and cleanup use an explicit `pool_id` label. A retryable create response performs bounded label recovery and blocks a second create while the first result is ambiguous.
+- Pool discovery and cleanup use an explicit `pool_id` label. A retryable create response performs bounded label recovery and blocks a second create while the first result is ambiguous. Primary IPv4 provisioning waits on the Hetzner action returned by `POST /primary_ips` through the generic `GET /actions/{id}` endpoint before the server may reference that IP.
 - One Durable Object operation gate serializes queue, bootstrap, claim, release, alarm, and provider mutations.
 - GitHub installation tokens are minted per operation and scoped to the webhook repository ID.
 
@@ -193,6 +193,7 @@ Until all gates pass, keep production workflows on the GitHub control-job adapte
 - Every provider resource carries a monotonic provisioning-attempt fence. An older, slow API call cannot adopt or delete a newer attempt's VM.
 - Completed and failed Durable Object records are pruned after a bounded retention window of at least 24 hours.
 - Queue messages retry only retryable upstream or concurrency failures. Terminal trust/auth/configuration failures are acknowledged and logged without their secret values.
+- Provider telemetry contains only the normalized operation, action/HTTP status, and machine-readable error code. It never records API tokens or provider response bodies.
 - Inspect the DLQ before replay. Correct the cause first; do not bulk replay unknown tasks.
 
 See [Serverless controller architecture](serverless-controller-architecture.md), [Operate the controller](controller-operations.md), and [Security policy](../SECURITY.md).

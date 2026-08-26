@@ -26,6 +26,7 @@ All notable changes to this project are documented in this file. The format is b
 - The Cloudflare bootstrap response now uses the `encoded_jit_config` field consumed by cloud-init.
 - The SSH fallback pins a generated per-run server host key instead of disabling host-key verification.
 - Pool JIT configuration remains mode `0600` but is owned by the immutable non-root runner UID/GID, allowing the disposable runner container to read it without widening access or running privileged.
+- Pool provisioning waits for the asynchronous Primary IPv4 create action to reach `success` before creating the server, with bounded polling, retryable provider classification, and safe operation/status/error-code telemetry.
 
 ### Security
 
