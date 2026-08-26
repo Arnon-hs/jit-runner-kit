@@ -15,7 +15,7 @@ Create one short-lived build host on demand, run up to two jobs in disposable ru
 
 `jit-runner-kit` is for maintainers of trusted repositories who want elastic self-hosted runners without keeping an expensive build server online. The public interface is repository-independent and contains no application deployment logic. Hetzner Cloud is the first provider driver; the provider interface is intentionally small so more drivers can be added later.
 
-> **Project status:** v0.2.0, pre-1.0. Real-cloud end-to-end runs for the GitHub control-job mode have passed on Hetzner CX33, including success, intentional failure, cancellation, and an empty final resource inventory. The Cloudflare serverless adapter supports repository- and organization-scoped GitHub Apps and is ready for a controlled canary, but it has not completed the live-cloud conformance gates and is not production-stable.
+> **Project status:** v0.3.0, pre-1.0 production pilot. The Cloudflare serverless adapter has completed real-cloud success, failure, cancellation, retry, TTL, two-container isolation, and scale-to-zero gates on Hetzner CX33. It now serves trusted main-branch release workflows in multiple private repositories. Keep the compatibility adapters available as an explicit rollback path and repeat the conformance gates for every installation.
 
 ## Why it exists
 
@@ -50,9 +50,9 @@ Need concurrent jobs or an always-on controller? See [Operate the controller](do
 | --- | ---: | --- | --- |
 | GitHub control jobs | Two short hosted jobs; self-hosted workload is not a hosted job | Stable migration fallback | Hosted jobs are rounded and require a short-lived state artifact |
 | External polling controller | 0 | Compatibility and constrained accounts | Needs a trusted always-on controller host |
-| Cloudflare scale-to-zero pool | 0 | Cost-sensitive private repositories with short bursts of trusted jobs | One temporary host runs at most two disposable runner containers; requires live-cloud conformance |
+| Cloudflare scale-to-zero pool | 0 | Cost-sensitive private repositories with short bursts of trusted jobs | One temporary host runs at most two disposable runner containers; each installation must pass live-cloud conformance |
 
-Keep the GitHub control-job mode as the production fallback until the serverless live-cloud gates pass. After a verified cutover, the Cloudflare adapter removes the two rounded GitHub-hosted control jobs while retaining the fallback implementation for recovery.
+After a verified cutover, the Cloudflare adapter removes the two rounded GitHub-hosted control jobs while retaining the fallback implementation for an explicit, reviewed rollback. Start with [Production cutover](docs/production-cutover.md) and keep the old and new flows from running for the same commit.
 
 ## Cloudflare serverless controller
 
@@ -62,7 +62,7 @@ In the recommended `hetzner-pool` mode it creates at most one SSH-free, deny-inb
 
 Cloudflare-controlled jobs include both `jit-runner` and `"jit-run-${{ github.run_id }}"`. The repository-scoped mode is the least-privilege default and supports private repositories owned by either a user or an organization: the App is installed only on served repositories, and the controller re-reads the exact workflow run and job before provisioning and before issuing JIT configuration. Organization scope is optional and adds a private runner group restricted to the exact trusted workflows. In both modes the controller accepts only configured push or manual events from the source repository, protected branches, pinned workflow paths, and exactly one matching queued JIT job.
 
-Start with the complete [Cloudflare controller deployment and canary guide](docs/cloudflare-controller.md). Keep production workflows on the existing adapter until success, failure, cancellation, two-job concurrency, idle release, retry/DLQ, and TTL gates all pass. The final independent provider inventory must report zero ephemeral and pool resources.
+Start with the complete [Cloudflare controller deployment and canary guide](docs/cloudflare-controller.md), then follow the [production cutover runbook](docs/production-cutover.md). Keep production workflows on the existing adapter until success, failure, cancellation, two-job concurrency, idle release, retry/DLQ, and TTL gates all pass for your installation. The final independent provider inventory must report zero ephemeral and pool resources.
 
 The committed Wrangler and GitHub App files are inert templates. `npm run preflight:cloudflare` rejects their placeholders for a live setup, while `npm run check:cloudflare-config` validates template consistency without contacting Cloudflare, GitHub, or Hetzner.
 

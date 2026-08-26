@@ -1,6 +1,6 @@
 # Serverless controller architecture
 
-Status: released in v0.2.0 for controlled canaries; local conformance, offline deployment preflight, and Worker bundle validation are complete, while live-cloud canaries remain required before production use.
+Status: released for pre-1.0 production pilots in v0.3.0. Local conformance, offline deployment preflight, Worker bundle validation, and real-cloud lifecycle gates are complete; each installation still requires its own canary evidence.
 
 JIT Runner Kit keeps lifecycle policy in a provider-agnostic core and puts deployment details behind adapters. Cloudflare is the first implemented controller platform and Hetzner Cloud is the first compute provider. Neither is part of the core contract.
 
@@ -114,4 +114,4 @@ Future Cloud Run, AWS Lambda, conventional webhook-service, or compute-provider 
 
 ## Delivery boundary
 
-The current Bash/OpenTofu GitHub control-job mode remains supported as compatibility fallback. The Cloudflare adapter is ready for a dedicated-project canary, not an unqualified production rollout. Operators must complete the checklist in [Deploy the Cloudflare controller](cloudflare-controller.md), including success, failure, cancellation, concurrent two-job isolation, DLQ, idle release, and TTL cleanup evidence with a final empty Hetzner inventory.
+The current Bash/OpenTofu GitHub control-job mode remains supported as a compatibility fallback. The Cloudflare adapter is suitable for a controlled production pilot after operators complete the checklist in [Deploy the Cloudflare controller](cloudflare-controller.md), including success, failure, cancellation, concurrent two-job isolation, DLQ, idle release, and TTL cleanup evidence with a final empty Hetzner inventory. The application workflow migration is covered by [Production cutover](production-cutover.md).

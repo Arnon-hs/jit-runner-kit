@@ -59,6 +59,7 @@ const BOOTSTRAP_AUTHORIZATION = /^Bearer [A-Za-z0-9_-]{43}$/;
 const POOL_CLAIM_PATH = "/v1/pool/claim";
 const POOL_ENROLL_PATH = "/v1/pool/enroll";
 const POOL_RELEASE_PATH = "/v1/pool/release";
+export const controllerVersion = "0.3.0";
 
 interface LeaseRecord {
   holder: string;
@@ -70,7 +71,7 @@ export default {
     try {
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/healthz") {
-        return json({ status: "ok", adapter: "cloudflare", version: "0.2.0" });
+        return json({ status: "ok", adapter: "cloudflare", version: controllerVersion });
       }
       if (request.method === "POST" && url.pathname === "/webhooks/github") {
         const limited = await enforcePublicRateLimit(request, env, "webhook");

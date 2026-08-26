@@ -1,6 +1,6 @@
 # Deploy the Cloudflare controller
 
-Status: v0.2.0 controlled-canary package. The Worker compiles and the provider-agnostic lifecycle, trust, cryptography, configuration, GitHub repository/organization scopes, and Hetzner adapter have local conformance coverage. Complete the live-cloud gates below before using it for production releases.
+Status: v0.3.0 pre-1.0 production pilot. The adapter has completed the live-cloud gates below on Hetzner CX33 and is running trusted main-branch release workflows in multiple private repositories. Every independent installation must repeat the gates before production use.
 
 ## What this adapter owns
 
@@ -180,7 +180,7 @@ Run these in a dedicated Hetzner project and a non-production GitHub repository:
 11. After the 10-15 minute idle observation, `bin/jit-runner inventory --require-empty` reports zero `ephemeral_*` and `pool_*` resources.
 12. A workflow outside `TRUSTED_WORKFLOWS` cannot acquire a runner even if it copies all runner labels; organization scope also proves the same through the runner-group policy.
 
-Until all gates pass, keep production workflows on the GitHub control-job adapter.
+Until all gates pass for your installation, keep production workflows on the GitHub control-job adapter. After they pass, follow [Production cutover](production-cutover.md) and retain the old adapter only as an explicit rollback path.
 
 ## Failure recovery
 

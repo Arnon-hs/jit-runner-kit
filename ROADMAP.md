@@ -20,7 +20,8 @@ This roadmap describes direction, not delivery promises.
 - [x] Use one-time bootstrap tokens so serverless mode needs no SSH or local OpenTofu state.
 - [x] Add structured controller events and health output.
 - [x] Publish offline-validated Wrangler, GitHub App, Queue/DLQ, Durable Object, Cron, and configuration preflight templates.
-- [ ] Complete live-cloud conformance canaries for queue retry/DLQ, Durable Object recovery, GitHub App bootstrap, success, failure, cancellation, and TTL cleanup. Local core, crypto, compute, and bundle conformance tests are present.
+- [x] Complete live-cloud conformance canaries for Queue retry/DLQ, Durable Object recovery, GitHub App bootstrap, success, failure, cancellation, two-container isolation, idle release, and TTL cleanup with an empty final provider inventory.
+- [ ] Publish a reusable, secret-free conformance harness that operators can run in their own dedicated canary repository and cloud project.
 
 ## Later, if demand is demonstrated
 
