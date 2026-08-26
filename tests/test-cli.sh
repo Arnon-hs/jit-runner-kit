@@ -181,7 +181,14 @@ run_pool_agent_case() {
     "$POOL_AGENT" --once >"$output_file" 2>"$error_file"
   status=$?
   set -e
-  [[ "$status" == 10 ]]
+  # The one-shot loop may observe the claimed background job while it is still
+  # active (status 0 after wait) or after it has already finished (status 10
+  # from the following no-content claim). Both outcomes are valid; the
+  # assertions below verify the job result and cleanup rather than its timing.
+  if [[ "$status" != 0 && "$status" != 10 ]]; then
+    printf 'unexpected pool agent exit status: %s\n' "$status" >&2
+    exit 1
+  fi
   grep -Fq -- '--env DOCKER_TLS_CERTDIR=' "$case_root/docker.log"
   grep -Fq -- '--network jrk-4242 --entrypoint docker dind:test --host=tcp://docker:2375 info' \
     "$case_root/docker.log"
