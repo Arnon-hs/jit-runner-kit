@@ -32,6 +32,26 @@ grep -Fxq 'StateDirectory=jit-runner-kit' "${ROOT_DIR}/providers/shared-host/jit
 grep -Fxq 'StateDirectoryMode=0700' "${ROOT_DIR}/providers/shared-host/jit-runner-pool-agent.service"
 grep -Fq 'useradd --create-home --uid 1001 --shell /bin/bash runner' \
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG GH_VERSION=2.98.0' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG GH_SHA256_X64=3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG GH_SHA256_ARM64=cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+EXPECTED_GH_ARCHIVE="gh_\${GH_VERSION}_linux_\${gh_arch}.tar.gz"
+EXPECTED_GH_CHECKSUM="echo \"\${gh_sha}  /tmp/gh.tar.gz\" | sha256sum --check --strict"
+EXPECTED_GH_BINARY="--strip-components=2 \"gh_\${GH_VERSION}_linux_\${gh_arch}/bin/gh\""
+EXPECTED_GH_LICENSE="--strip-components=1 \"gh_\${GH_VERSION}_linux_\${gh_arch}/LICENSE\""
+grep -Fq "$EXPECTED_GH_ARCHIVE" \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq "$EXPECTED_GH_CHECKSUM" \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq -- "$EXPECTED_GH_BINARY" \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq 'chmod 0555 /usr/local/bin/gh' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq -- "$EXPECTED_GH_LICENSE" \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq 'chmod 0444 /usr/share/doc/gh/LICENSE' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq '&& gh --version' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 EXPECTED_JIT_CONFIG_PATH="\${job_dir}/jit-config"
 grep -Fq "chmod 600 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"
 grep -Fq "chown 1001:1001 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"

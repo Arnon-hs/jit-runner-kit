@@ -3,9 +3,13 @@ FROM ubuntu:24.04
 ARG RUNNER_VERSION
 ARG RUNNER_SHA256_X64
 ARG RUNNER_SHA256_ARM64
+ARG GH_VERSION=2.98.0
+ARG GH_SHA256_X64=3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de
+ARG GH_SHA256_ARM64=cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86
 ARG TARGETARCH
 
 RUN test -n "$RUNNER_VERSION" && test -n "$RUNNER_SHA256_X64" && test -n "$RUNNER_SHA256_ARM64" \
+    && test -n "$GH_VERSION" && test -n "$GH_SHA256_X64" && test -n "$GH_SHA256_ARM64" \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
       build-essential ca-certificates curl docker-compose-v2 docker.io git jq php-cli python3 shellcheck unzip \
@@ -13,8 +17,8 @@ RUN test -n "$RUNNER_VERSION" && test -n "$RUNNER_SHA256_X64" && test -n "$RUNNE
     && useradd --create-home --uid 1001 --shell /bin/bash runner \
     && install -d -o runner -g runner /opt/actions-runner /runner \
     && case "$TARGETARCH" in \
-         amd64) runner_arch=x64; runner_sha="$RUNNER_SHA256_X64" ;; \
-         arm64) runner_arch=arm64; runner_sha="$RUNNER_SHA256_ARM64" ;; \
+         amd64) runner_arch=x64; runner_sha="$RUNNER_SHA256_X64"; gh_arch=amd64; gh_sha="$GH_SHA256_X64" ;; \
+         arm64) runner_arch=arm64; runner_sha="$RUNNER_SHA256_ARM64"; gh_arch=arm64; gh_sha="$GH_SHA256_ARM64" ;; \
          *) exit 1 ;; \
        esac \
     && curl --fail --show-error --location --proto '=https' --tlsv1.2 \
@@ -23,6 +27,19 @@ RUN test -n "$RUNNER_VERSION" && test -n "$RUNNER_SHA256_X64" && test -n "$RUNNE
     && echo "${runner_sha}  /tmp/actions-runner.tar.gz" | sha256sum --check --strict \
     && tar --extract --gzip --file /tmp/actions-runner.tar.gz --directory /opt/actions-runner \
     && rm /tmp/actions-runner.tar.gz \
+    && curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+      --output /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_arch}.tar.gz" \
+    && echo "${gh_sha}  /tmp/gh.tar.gz" | sha256sum --check --strict \
+    && install -d /usr/share/doc/gh \
+    && tar --extract --gzip --file /tmp/gh.tar.gz --directory /usr/local/bin \
+      --strip-components=2 "gh_${GH_VERSION}_linux_${gh_arch}/bin/gh" \
+    && tar --extract --gzip --file /tmp/gh.tar.gz --directory /usr/share/doc/gh \
+      --strip-components=1 "gh_${GH_VERSION}_linux_${gh_arch}/LICENSE" \
+    && chmod 0555 /usr/local/bin/gh \
+    && chmod 0444 /usr/share/doc/gh/LICENSE \
+    && rm /tmp/gh.tar.gz \
+    && gh --version \
     && /opt/actions-runner/bin/installdependencies.sh \
     && chown -R runner:runner /opt/actions-runner /runner
 

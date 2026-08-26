@@ -4,6 +4,8 @@ The one-VM-per-job compatibility runner starts from Ubuntu 24.04 and is prepared
 
 Keep application-specific setup in the application workflow when it benefits from an official, checksum-aware setup action or must vary between jobs. Put stable operating-system dependencies in cloud-init when downloading them for every workflow would be slower or less reliable.
 
+The pool image includes GitHub CLI because release and deployment workflows commonly query GitHub APIs after the build. Its version and per-architecture SHA-256 digests are pinned in `Dockerfile.runner`; update all three values together from the official GitHub CLI release checksums, then rebuild and verify `gh --version` inside the resulting image. Keep service-specific authentication in workflow secrets such as `GH_TOKEN` rather than baking it into the image.
+
 ## Add Ubuntu packages
 
 For the compatibility VM, add package names to the cloud-init `packages` list. For the pool image, add them to the `apt-get install --yes --no-install-recommends` list in `Dockerfile.runner`. Both install as root before the JIT runner starts.
@@ -138,6 +140,7 @@ Keep the snapshot free of runner registrations and credentials. Patch and rebuil
 | Requirement | Recommended layer |
 | --- | --- |
 | Common Ubuntu library in the elastic pool | `Dockerfile.runner` apt list |
+| GitHub API calls from pool workflows | Checksum-pinned GitHub CLI in `Dockerfile.runner` |
 | Common Ubuntu library in compatibility VMs | `cloud-init.yaml` package list |
 | Different login shell in pool containers | Dockerfile package plus `useradd --shell` |
 | Different login shell in compatibility VMs | Package list plus `users.runner.shell` |
