@@ -62,6 +62,7 @@ const RETRYABLE_ERROR_CODES = new Set([
 ]);
 
 class HetznerActionStillRunningError extends RetryableError {}
+class HetznerTransportError extends RetryableError {}
 
 /**
  * One elastic Hetzner host shared by a bounded number of disposable runner
@@ -184,13 +185,14 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
         })
       ).server;
     } catch (error) {
-      if (!(error instanceof RetryableError)) {
+      if (error instanceof HetznerTransportError) {
+        server = await this.recoverSingleHost();
+        if (!server) throw new RetryableError("pool host create outcome remains ambiguous", 30);
+      } else {
         await this.deleteId("primary_ips", primaryIp.id);
         await this.deleteId("firewalls", firewall.id);
         throw error;
       }
-      server = await this.recoverSingleHost();
-      if (!server) throw new RetryableError("pool host create outcome remains ambiguous", 30);
     }
 
     try {
@@ -407,7 +409,7 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
       });
     } catch {
       emitProviderTelemetry(providerOperation(path, init.method), "transport_error");
-      throw new RetryableError("Hetzner API transport failure", 30);
+      throw new HetznerTransportError("Hetzner API transport failure", 30);
     }
     if (response.ok) return response.status === 204 ? undefined as T : await response.json() as T;
     if (allowMissing && response.status === 404) return undefined as T;
