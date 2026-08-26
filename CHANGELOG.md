@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-26
+
 ### Added
 
 - A Cloudflare-controlled `hetzner-pool` compute adapter that scales from zero to one host and runs at most two recommended disposable runner/DinD pairs.
@@ -11,6 +13,7 @@ All notable changes to this project are documented in this file. The format is b
 - Split `ephemeral_*` and `pool_*` inventory plus independent TTL sweeping for both provider ownership labels.
 - Repository-scoped GitHub App mode for private repositories owned by either users or organizations, with a least-privilege App manifest.
 - A release control contract covering one-heavy-job workflow shape, exact-SHA gates, duplicate-release prevention, cleanup inventory, deployment identity, and browser verification.
+- A production cutover runbook covering least-privilege App scope, one-job workflow migration, DinD service networking, duplicate-run prevention, exact-SHA evidence, and cost controls.
 - Public endpoint rate limiting plus regression coverage for oversized/non-JSON webhooks, malformed bootstrap requests, untrusted workflow events, and ambiguous queued jobs.
 
 ### Changed
@@ -20,6 +23,7 @@ All notable changes to this project are documented in this file. The format is b
 - Cloudflare preflight now validates repository or organization scope, trusted non-PR events, scope-specific App permissions, and the Rate Limit binding.
 - Compatibility polling now fails closed unless event, source repository, branch, pinned workflow path, run-scoped label, and a single eligible queued job all match.
 - Examples remove pull-request triggers from privileged JIT paths, disable persisted checkout credentials, and pin toolkit actions to a full commit SHA.
+- Production cutover guidance treats an observed exact-SHA push event as pending release authority and forbids timer-based manual fallback for the same SHA.
 
 ### Fixed
 
@@ -29,6 +33,7 @@ All notable changes to this project are documented in this file. The format is b
 - Pool provisioning waits for the asynchronous Primary IPv4 create action to reach `success` before creating the server, with bounded polling, retryable provider classification, and safe operation/status/error-code telemetry.
 - Pool DinD sidecars disable the image's automatic TLS mode explicitly, and readiness is now proven from an isolated client on the per-job network over the same plaintext Docker endpoint used by the runner.
 - The pool runner image now includes a version- and checksum-pinned GitHub CLI so reusable release workflows can query GitHub without service-specific bootstrap steps.
+- The Cloudflare health endpoint now reports the package release version, with a regression test that prevents release metadata drift.
 
 ### Security
 
@@ -84,6 +89,7 @@ All notable changes to this project are documented in this file. The format is b
 - Per-run ownership labels, rollback-safe provisioning, runner-record deletion, and two-path cleanup limit orphaned resources.
 - Official GitHub runner archives are verified against their published SHA-256 digest.
 
-[Unreleased]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Arnon-hs/jit-runner-kit/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Arnon-hs/jit-runner-kit/releases/tag/v0.1.0

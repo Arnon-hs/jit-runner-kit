@@ -1,9 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
-import worker, { SerialOperationGate, type Env } from "../packages/adapter-controller-cloudflare/src/index";
+import packageMetadata from "../package.json";
+import worker, {
+  controllerVersion,
+  SerialOperationGate,
+  type Env,
+} from "../packages/adapter-controller-cloudflare/src/index";
 
 const secret = "test-webhook-secret";
 
 describe("Cloudflare public webhook boundary", () => {
+  it("reports the package release version from the health endpoint", async () => {
+    const packageVersion = packageMetadata.version;
+    const response = await worker.fetch(
+      new Request("https://controller.example.test/healthz"),
+      fixtureEnv(),
+    );
+
+    expect(controllerVersion).toBe(packageVersion);
+    expect(await response.json()).toEqual({
+      status: "ok",
+      adapter: "cloudflare",
+      version: packageVersion,
+    });
+  });
+
   it("returns a non-retryable response for an authenticated but untrusted job", async () => {
     const env = fixtureEnv();
     const response = await worker.fetch(await webhookRequest({
