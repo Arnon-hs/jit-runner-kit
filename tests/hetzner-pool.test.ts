@@ -122,7 +122,7 @@ describe("elastic Hetzner pool compute adapter", () => {
 
   it("recovers an already-created host after an ambiguous server-create response", async () => {
     const api = new FakeHetznerPoolApi();
-    api.loseFirstServerCreateResponse = true;
+    api.loseFirstServerCreateTransportResponse = true;
     const provider = createProvider(api.fetch);
 
     const resource = await provider.create(request("job-101"));
@@ -130,6 +130,25 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(resource.serverId).toBe("11");
     expect(api.serverCreates).toBe(1);
     expect(api.servers).toHaveLength(1);
+  });
+
+  it("preserves detached capacity only when the server-create outcome is unknown", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.failFirstServerCreateTransportBeforeRequest = true;
+    const provider = createProvider(api.fetch);
+
+    await expect(provider.create(request("job-101")))
+      .rejects.toThrow("pool host create outcome remains ambiguous");
+
+    expect(api.serverCreates).toBe(1);
+    expect(api.servers).toHaveLength(0);
+    expect(api.firewalls).toHaveLength(1);
+    expect(api.ips).toHaveLength(1);
+    expect(api.deletes).toEqual([]);
+
+    await expect(provider.create(request("job-101")))
+      .rejects.toThrow("pool host creation outcome is still ambiguous");
+    expect(api.serverCreates).toBe(1);
   });
 
   it("waits for the Primary IP action before creating a server", async () => {
@@ -223,15 +242,47 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(api.deletes).toEqual(["primary_ips/31", "firewalls/21"]);
   });
 
-  it("maps an HTTP 412 provider precondition failure to a retryable create", async () => {
+  it("cleans a known retryable server response and permits an immediate retry", async () => {
     const api = new FakeHetznerPoolApi();
     api.serverCreateFailure = { status: 412, code: "resource_unavailable", message: "capacity is warming" };
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "info").mockImplementation((value) => logs.push(String(value)));
 
-    await expect(createProvider(api.fetch).create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+    try {
+      const provider = createProvider(api.fetch);
+      await expect(provider.create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+
+      expect(api.serverCreates).toBe(1);
+      expect(api.deletes).toEqual(["primary_ips/31", "firewalls/21"]);
+      expect(api.servers).toHaveLength(0);
+      expect(api.firewalls).toHaveLength(0);
+      expect(api.ips).toHaveLength(0);
+
+      api.serverCreateFailure = null;
+      await expect(provider.create(request("job-101"))).resolves.toMatchObject({ serverId: "11" });
+      expect(api.serverCreates).toBe(2);
+    } finally {
+      log.mockRestore();
+    }
+
+    expect(logs.join("\n")).toContain('"operation":"POST /servers"');
+    expect(logs.join("\n")).toContain('"httpStatus":412');
+    expect(logs.join("\n")).toContain('"errorCode":"resource_unavailable"');
+    expect(logs.join("\n")).not.toContain("capacity is warming");
+    expect(logs.join("\n")).not.toContain("test-token");
+  });
+
+  it("cleans detached capacity after a known terminal server response", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.serverCreateFailure = { status: 422, code: "invalid_input", message: "request cannot be accepted" };
+
+    await expect(createProvider(api.fetch).create(request("job-101"))).rejects.toBeInstanceOf(TerminalError);
 
     expect(api.serverCreates).toBe(1);
-    expect(api.deletes).toEqual([]);
+    expect(api.deletes).toEqual(["primary_ips/31", "firewalls/21"]);
     expect(api.servers).toHaveLength(0);
+    expect(api.firewalls).toHaveLength(0);
+    expect(api.ips).toHaveLength(0);
   });
 
   it("scopes discovery and cleanup to one explicit pool id", async () => {
@@ -305,7 +356,8 @@ class FakeHetznerPoolApi {
   actionReads = 0;
   deletes: string[] = [];
   lastServerBody: Record<string, unknown> | undefined;
-  loseFirstServerCreateResponse = false;
+  loseFirstServerCreateTransportResponse = false;
+  failFirstServerCreateTransportBeforeRequest = false;
   primaryIpActionStatuses: Array<"running" | "success" | "error"> = ["success"];
   primaryIpActionError: { code: string; message: string } | null = null;
   actionReadFailure: { code: string; message: string } | null = null;
@@ -358,6 +410,10 @@ class FakeHetznerPoolApi {
       this.serverCreates += 1;
       this.serverCreateActionStatuses.push(this.primaryIpAction().status);
       this.lastServerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (this.failFirstServerCreateTransportBeforeRequest) {
+        this.failFirstServerCreateTransportBeforeRequest = false;
+        throw new TypeError("connection reset before provider accepted request");
+      }
       if (this.primaryIpAction().status !== "success") {
         return Response.json({
           error: { code: "invalid_input", message: "Primary IPv4 is not ready" },
@@ -376,9 +432,9 @@ class FakeHetznerPoolApi {
       const ip = primaryIp.ip;
       const server = this.makeServer(serverId, this.lastServerBody.labels as Record<string, string>, ipId, ip);
       this.servers.push(server);
-      if (this.loseFirstServerCreateResponse) {
-        this.loseFirstServerCreateResponse = false;
-        return Response.json({ error: { message: "gateway timeout" } }, { status: 503 });
+      if (this.loseFirstServerCreateTransportResponse) {
+        this.loseFirstServerCreateTransportResponse = false;
+        throw new TypeError("connection reset after provider accepted request");
       }
       return Response.json({ server }, { status: 201 });
     }
