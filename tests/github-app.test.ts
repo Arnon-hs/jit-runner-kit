@@ -16,6 +16,27 @@ const event: TrustedWorkflowJobEvent = {
 };
 
 describe("GitHub App runner control", () => {
+  it("invokes a native-style fetcher without an instance receiver", async () => {
+    const delegate = githubFetcher({ selected_workflows: [workflow] });
+    const receivers: unknown[] = [];
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const fetcher = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+      receivers.push(this);
+      signals.push(init?.signal);
+      return delegate(input, init);
+    } as typeof fetch;
+    const control = createControl(
+      fetcher as unknown as ReturnType<typeof githubFetcher>,
+      [workflow],
+      "repository",
+    );
+
+    await expect(control.assertRepositoryAccess(event)).resolves.toBeUndefined();
+    expect(receivers.length).toBeGreaterThan(0);
+    expect(receivers.every((receiver) => receiver === undefined)).toBe(true);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+  });
+
   it("requires a private organization runner group restricted to the configured workflows", async () => {
     const fetcher = githubFetcher({ selected_workflows: [workflow] });
     const control = createControl(fetcher);

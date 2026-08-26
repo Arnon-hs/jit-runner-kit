@@ -29,6 +29,10 @@ const event: TrustedWorkflowJobEvent = {
 };
 
 describe("provider-agnostic controller", () => {
+  it("enforces the global two-runner safety ceiling in the core", () => {
+    expect(() => createFixture(3)).toThrow("maxRunners must be between 1 and 2");
+  });
+
   it("runs queued -> bootstrap -> completed and cleans every external record", async () => {
     const fixture = createFixture();
     await fixture.controller.handleWorkflowJob(event);
@@ -151,6 +155,64 @@ describe("provider-agnostic controller", () => {
     await fixture.controller.handleWorkflowJob({ ...event, action: "completed" });
     expect(await fixture.controller.releaseIdlePoolHost("192.0.2.10")).toBe(true);
     expect(provider.released).toBe(1);
+  });
+
+  it("fails closed and releases an elastic host that misses the bootstrap deadline", async () => {
+    const provider = new MemoryElasticPoolProvider();
+    const fixture = createFixture(2, provider);
+    await fixture.controller.handleWorkflowJob(event);
+
+    fixture.clock.value = 1_061;
+    await fixture.controller.reconcile();
+
+    expect((await fixture.jobs.get("job-101"))?.state).toBe("completed");
+    expect(provider.released).toBe(1);
+    expect(fixture.leases.active.size).toBe(0);
+  });
+
+  it("bounds a controller crash left in bootstrapping and releases its pool host", async () => {
+    const provider = new MemoryElasticPoolProvider();
+    const fixture = createFixture(2, provider);
+    await fixture.jobs.compareAndSet("job-101", null, {
+      key: "job-101",
+      version: 0,
+      state: "bootstrapping",
+      event,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+      expiresAt: 1_300,
+      compute: {
+        provider: "hetzner-pool-job",
+        serverId: "pool-server-1",
+        firewallId: "pool-firewall-1",
+        primaryIpv4Id: "pool-ip-1",
+        publicIpv4: "192.0.2.10",
+        expiresAt: 1_300,
+        jobKey: "job-101",
+      },
+    });
+    await fixture.leases.acquire("global", "job-101", 2, 1_300);
+
+    fixture.clock.value = 1_061;
+    await fixture.controller.reconcile();
+
+    expect((await fixture.jobs.get("job-101"))?.state).toBe("completed");
+    expect(provider.released).toBe(1);
+    expect(fixture.leases.active.size).toBe(0);
+    expect(fixture.telemetryEvents.map(({ name }) => name)).toContain("compute.pool_bootstrap_host_released");
+  });
+
+  it("does not report a pool host release when the provider released nothing", async () => {
+    const provider = new MemoryElasticPoolProvider();
+    provider.releaseResult = false;
+    const fixture = createFixture(2, provider);
+    await fixture.controller.handleWorkflowJob(event);
+
+    fixture.clock.value = 1_061;
+    await fixture.controller.reconcile();
+
+    expect((await fixture.jobs.get("job-101"))?.state).toBe("completed");
+    expect(fixture.telemetryEvents.map(({ name }) => name)).not.toContain("compute.pool_bootstrap_host_released");
   });
 
   it("cleans expired jobs and provider-labeled orphans", async () => {
@@ -333,7 +395,8 @@ function createFixture(maxRunners = 2, provider?: ComputeProvider) {
     : memoryCompute;
   const compute = memoryCompute;
   const runners = new MemoryRunnerControl();
-  const telemetry: Telemetry = { emit: () => undefined };
+  const telemetryEvents: Array<{ name: string; attributes: Record<string, string | number | boolean> }> = [];
+  const telemetry: Telemetry = { emit: (name, attributes) => { telemetryEvents.push({ name, attributes }); } };
   const controller = new Controller(
     {
       maxRunners,
@@ -355,7 +418,7 @@ function createFixture(maxRunners = 2, provider?: ComputeProvider) {
       telemetry,
     },
   );
-  return { controller, jobs, leases, compute, runners, clock };
+  return { controller, jobs, leases, compute, runners, clock, telemetryEvents };
 }
 
 class MemoryJobStore implements JobStore {
@@ -486,6 +549,7 @@ class RecordingComputeProvider implements ComputeProvider {
 
 class MemoryElasticPoolProvider implements ComputeProvider {
   released = 0;
+  releaseResult = true;
   async create(request: ComputeCreateRequest): Promise<ComputeResource> {
     return {
       provider: "hetzner-pool-job",
@@ -501,6 +565,7 @@ class MemoryElasticPoolProvider implements ComputeProvider {
   async listExpired() { return []; }
   async releaseIdleHost(sourceIp: string) {
     if (sourceIp !== "192.0.2.10") return false;
+    if (!this.releaseResult) return false;
     this.released += 1;
     return true;
   }

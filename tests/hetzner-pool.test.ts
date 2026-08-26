@@ -7,6 +7,23 @@ const dind = `docker:27-dind@sha256:${"a".repeat(64)}`;
 const runner = `ghcr.io/owner/runner@sha256:${"b".repeat(64)}`;
 
 describe("elastic Hetzner pool compute adapter", () => {
+  it("invokes a native-style fetcher without an instance receiver", async () => {
+    const api = new FakeHetznerPoolApi();
+    const receivers: unknown[] = [];
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const fetcher = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+      receivers.push(this);
+      signals.push(init?.signal);
+      return api.fetch(input, init);
+    } as typeof fetch;
+
+    await createProvider(fetcher).listExpired(1_000);
+
+    expect(receivers.length).toBeGreaterThan(0);
+    expect(receivers.every((receiver) => receiver === undefined)).toBe(true);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+  });
+
   it("reuses at most one host and deletes no provider object during per-job cleanup", async () => {
     const api = new FakeHetznerPoolApi();
     const provider = createProvider(api.fetch);
@@ -17,10 +34,19 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(first.publicIpv4).toBe("192.0.2.10");
     expect(api.serverCreates).toBe(1);
     expect(api.firewallCreates).toBe(1);
+    expect(api.primaryIpCreates).toBe(1);
+    expect(api.ips[0]?.labels).toMatchObject({
+      managed_by: "jit-runner-kit-pool",
+      controller: "cloudflare",
+      pool_id: "canary",
+    });
     expect(api.lastServerBody?.firewalls).toEqual([{ firewall: 21 }]);
-    expect(api.lastServerBody?.public_net).toEqual({ enable_ipv4: true, enable_ipv6: false });
+    expect(api.lastServerBody?.public_net).toEqual({ enable_ipv4: true, enable_ipv6: false, ipv4: 31 });
     expect(String(api.lastServerBody?.user_data)).not.toContain("bootstrap-token");
     expect(String(api.lastServerBody?.user_data)).toContain("#cloud-config");
+    const writtenFiles = decodeCloudInitFiles(String(api.lastServerBody?.user_data));
+    expect(writtenFiles).toContain("StateDirectory=jit-runner-kit");
+    expect(writtenFiles).toContain("install -d -m 0700 /var/lib/jit-runner-kit");
 
     await provider.delete(first);
     expect(api.deletes).toEqual([]);
@@ -31,9 +57,59 @@ describe("elastic Hetzner pool compute adapter", () => {
     const provider = createProvider(api.fetch);
     await provider.create(request("job-101"));
     expect(await provider.releaseIdleHost("198.51.100.8")).toBe(false);
+    expect(api.deletes).toEqual([]);
     expect(await provider.releaseIdleHost("192.0.2.10")).toBe(true);
     expect(api.deletes).toEqual(["servers/11", "primary_ips/31", "firewalls/21"]);
     expect(await provider.releaseIdleHost("192.0.2.10")).toBe(false);
+  });
+
+  it("keeps newly-created provider objects during the eventual-consistency grace", async () => {
+    const api = new FakeHetznerPoolApi();
+    const labels = { pool_id: "canary", created_at: "900", expires_at: "9999999999" };
+    api.firewalls.push({ id: 21, labels });
+    api.ips.push({ id: 31, ip: "192.0.2.10", labels });
+
+    await createProvider(api.fetch).listExpired(1_000);
+
+    expect(api.deletes).toEqual([]);
+  });
+
+  it("does not recycle an ambiguous pool capacity unit between 120 and 300 seconds", async () => {
+    const api = new FakeHetznerPoolApi();
+    const createdAt = Math.floor(Date.now() / 1000) - 121;
+    const labels = { pool_id: "canary", created_at: String(createdAt), expires_at: "9999999999" };
+    api.firewalls.push({ id: 21, labels });
+    api.ips.push({ id: 31, ip: "192.0.2.10", labels });
+
+    await expect(createProvider(api.fetch).create(request("job-101")))
+      .rejects.toThrow("pool host creation outcome is still ambiguous");
+
+    expect(api.deletes).toEqual([]);
+    expect(api.serverCreates).toBe(0);
+  });
+
+  it("recycles detached pool capacity only after the full 300-second grace", async () => {
+    const api = new FakeHetznerPoolApi();
+    const createdAt = Math.floor(Date.now() / 1000) - 301;
+    const labels = { pool_id: "canary", created_at: String(createdAt), expires_at: "9999999999" };
+    api.firewalls.push({ id: 21, labels });
+    api.ips.push({ id: 31, ip: "192.0.2.10", labels });
+
+    await createProvider(api.fetch).create(request("job-101"));
+
+    expect(api.deletes.slice(0, 2)).toEqual(["primary_ips/31", "firewalls/21"]);
+    expect(api.serverCreates).toBe(1);
+  });
+
+  it("removes detached provider objects after a bounded creation grace", async () => {
+    const api = new FakeHetznerPoolApi();
+    const labels = { pool_id: "canary", created_at: "600", expires_at: "9999999999" };
+    api.firewalls.push({ id: 21, labels });
+    api.ips.push({ id: 31, ip: "192.0.2.10", labels });
+
+    await createProvider(api.fetch).listExpired(1_000);
+
+    expect(api.deletes).toEqual(["firewalls/21", "primary_ips/31"]);
   });
 
   it("fails closed instead of creating a second pool host", async () => {
@@ -84,7 +160,7 @@ function createProvider(fetcher: typeof fetch, poolId = "canary"): HetznerPoolCo
     enrollmentToken: "e".repeat(43),
     poolId,
     apiUrl: "https://api.example.test/v1",
-  }, fetcher);
+  }, fetcher, async () => undefined);
 }
 
 function request(jobKey: string): ComputeCreateRequest {
@@ -104,12 +180,19 @@ function request(jobKey: string): ComputeCreateRequest {
   };
 }
 
+function decodeCloudInitFiles(value: string): string {
+  return [...value.matchAll(/content: ([A-Za-z0-9+/=]+)/g)]
+    .map((match) => Buffer.from(match[1]!, "base64").toString("utf8"))
+    .join("\n");
+}
+
 class FakeHetznerPoolApi {
   servers: Array<ReturnType<FakeHetznerPoolApi["makeServer"]>> = [];
   firewalls: Array<{ id: number; labels: Record<string, string> }> = [];
   ips: Array<{ id: number; ip: string; labels: Record<string, string> }> = [];
   serverCreates = 0;
   firewallCreates = 0;
+  primaryIpCreates = 0;
   deletes: string[] = [];
   lastServerBody: Record<string, unknown> | undefined;
   loseFirstServerCreateResponse = false;
@@ -139,15 +222,25 @@ class FakeHetznerPoolApi {
       this.firewalls.push(firewall);
       return Response.json({ firewall }, { status: 201 });
     }
+    if (method === "POST" && path === "primary_ips") {
+      this.primaryIpCreates += 1;
+      const body = JSON.parse(String(init?.body)) as { labels: Record<string, string> };
+      const id = this.nextIpId++;
+      const primaryIp = { id, ip: `192.0.2.${id - 21}`, labels: body.labels };
+      this.ips.push(primaryIp);
+      return Response.json({ primary_ip: primaryIp }, { status: 201 });
+    }
     if (method === "POST" && path === "servers") {
       this.serverCreates += 1;
       this.lastServerBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const serverId = this.nextServerId++;
-      const ipId = this.nextIpId++;
-      const ip = `192.0.2.${serverId - 1}`;
+      const publicNet = this.lastServerBody.public_net as { ipv4: number };
+      const primaryIp = this.ips.find((item) => item.id === publicNet.ipv4);
+      if (!primaryIp) return Response.json({ error: { message: "Primary IPv4 missing" } }, { status: 400 });
+      const ipId = primaryIp.id;
+      const ip = primaryIp.ip;
       const server = this.makeServer(serverId, this.lastServerBody.labels as Record<string, string>, ipId, ip);
       this.servers.push(server);
-      this.ips.push({ id: ipId, ip, labels: {} });
       if (this.loseFirstServerCreateResponse) {
         this.loseFirstServerCreateResponse = false;
         return Response.json({ error: { message: "gateway timeout" } }, { status: 503 });

@@ -57,10 +57,10 @@ describe("Cloudflare deployment preflight", () => {
     expect(validateCloudflareConfig(config, { template: true })).toEqual([]);
 
     config.vars.POOL_HOST_IPV4 = "not-an-ip";
-    config.vars.MAX_RUNNERS = "5";
+    config.vars.MAX_RUNNERS = "3";
     expect(validateCloudflareConfig(config, { template: true })).toEqual(expect.arrayContaining([
       "POOL_HOST_IPV4 is invalid for shared-host mode",
-      "MAX_RUNNERS must not exceed 4 in shared-host mode",
+      "MAX_RUNNERS must be between 1 and 2",
     ]));
   });
 

@@ -40,7 +40,11 @@ export class Controller {
   constructor(
     private readonly config: ControllerConfig,
     private readonly ports: ControllerPorts,
-  ) {}
+  ) {
+    if (!Number.isInteger(config.maxRunners) || config.maxRunners < 1 || config.maxRunners > 2) {
+      throw new TerminalError("maxRunners must be between 1 and 2");
+    }
+  }
 
   async handleWorkflowJob(event: TrustedWorkflowJobEvent): Promise<void> {
     if (event.action === "completed") {
@@ -206,6 +210,18 @@ export class Controller {
           errors.push(error);
           this.emitCleanupFailure(job.key, "provisioning-recovery", error);
         }
+        continue;
+      }
+      if (
+        ["awaiting-bootstrap", "bootstrapping"].includes(job.state)
+        && job.updatedAt + this.config.provisioningTimeoutSeconds <= now
+      ) {
+        try {
+          await this.cleanupBootstrapTimeout(job);
+        } catch (error) {
+          errors.push(error);
+          this.emitCleanupFailure(job.key, "bootstrap-timeout", error);
+        }
       }
     }
     try {
@@ -259,6 +275,26 @@ export class Controller {
     }
   }
 
+  private async cleanupBootstrapTimeout(record: JobRecord): Promise<void> {
+    if (record.compute?.provider === "hetzner-pool-job" && this.ports.compute.releaseIdleHost) {
+      const peers = (await this.ports.jobs.listActive()).some((candidate) =>
+        candidate.key !== record.key
+        && candidate.compute?.provider === "hetzner-pool-job"
+        && candidate.compute.publicIpv4 === record.compute!.publicIpv4,
+      );
+      if (!peers) {
+        const released = await this.ports.compute.releaseIdleHost(record.compute.publicIpv4);
+        if (released) {
+          this.ports.telemetry.emit("compute.pool_bootstrap_host_released", {
+            jobKey: record.key,
+            serverId: record.compute.serverId,
+          });
+        }
+      }
+    }
+    await this.cleanup(record, "bootstrap-timeout");
+  }
+
   private async handleQueued(event: TrustedWorkflowJobEvent): Promise<void> {
     const key = jobKey(event);
     let record = await this.ports.jobs.get(key);
@@ -288,8 +324,11 @@ export class Controller {
       if (!leaseAcquired) {
         throw new RetryableError("controller concurrency limit reached", 30);
       }
+      this.ports.telemetry.emit("provision.phase", { jobKey: key, phase: "repository-access-start" });
       await this.ports.runners.assertRepositoryAccess(event);
+      this.ports.telemetry.emit("provision.phase", { jobKey: key, phase: "repository-access-complete" });
       const minted = await this.ports.bootstrapTokens.mint();
+      this.ports.telemetry.emit("provision.phase", { jobKey: key, phase: "compute-create-start" });
       const resource = await this.ports.compute.create({
         jobKey: key,
         repository: event.repository.fullName,
@@ -427,6 +466,7 @@ export class Controller {
       jobKey,
       phase,
       errorType: error instanceof Error ? error.name : "unknown",
+      errorCode: safeProviderErrorCode(error),
     });
   }
 
@@ -497,6 +537,12 @@ export function trustWorkflowJobPayload(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function safeProviderErrorCode(error: unknown): string {
+  if (!(error instanceof Error)) return "unknown";
+  const match = error.message.match(/^(Hetzner|GitHub) API (\d{3}):/);
+  return match ? `${match[1]!.toLowerCase()}_api_${match[2]}` : "unclassified";
 }
 
 class CapacityLeaseError extends RetryableError {}
