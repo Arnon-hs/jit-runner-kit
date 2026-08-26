@@ -27,6 +27,7 @@ All notable changes to this project are documented in this file. The format is b
 - The SSH fallback pins a generated per-run server host key instead of disabling host-key verification.
 - Pool JIT configuration remains mode `0600` but is owned by the immutable non-root runner UID/GID, allowing the disposable runner container to read it without widening access or running privileged.
 - Pool provisioning waits for the asynchronous Primary IPv4 create action to reach `success` before creating the server, with bounded polling, retryable provider classification, and safe operation/status/error-code telemetry.
+- Pool DinD sidecars disable the image's automatic TLS mode explicitly, and readiness is now proven from an isolated client on the per-job network over the same plaintext Docker endpoint used by the runner.
 
 ### Security
 
