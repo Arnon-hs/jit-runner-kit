@@ -24,6 +24,8 @@ interface HetznerPrimaryIp {
   assignee_id: number | null;
 }
 
+const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
+
 export class HetznerComputeProvider implements ComputeProvider {
   private readonly apiUrl: string;
 
@@ -233,15 +235,17 @@ export class HetznerComputeProvider implements ComputeProvider {
   private async request<T = unknown>(path: string, init: RequestInit, allowMissing = false): Promise<T> {
     let response: Response;
     try {
-      response = await this.fetcher(`${this.apiUrl}${path}`, {
+      const fetcher = this.fetcher;
+      response = await fetcher(`${this.apiUrl}${path}`, {
         ...init,
+        signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
         headers: {
           Authorization: `Bearer ${this.config.token}`,
           "Content-Type": "application/json",
         },
       });
-    } catch (error) {
-      throw new RetryableError(`Hetzner API transport failure: ${errorMessage(error)}`, 30);
+    } catch {
+      throw new RetryableError("Hetzner API transport failure", 30);
     }
     if (response.ok) {
       if (response.status === 204) return undefined as T;

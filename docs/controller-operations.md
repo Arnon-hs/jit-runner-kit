@@ -35,7 +35,7 @@ With `max_runners: 2`, two queued jobs can run at the same time on two separate 
 
 This model preserves the main security property: one VM executes one job and is then destroyed. It also avoids Docker socket, workspace, cache, CPU, and memory collisions between jobs.
 
-Do not run multiple runner processes directly on one persistent host. The pool adapter supplies disposable container/DinD pairs, enforces a hard maximum of four (two recommended), and deletes the entire capacity unit after idle. Use the one-VM-per-job compatibility adapter when a workload requires a stronger VM boundary.
+Do not run multiple runner processes directly on one persistent host. The pool adapter supplies isolated disposable container/DinD pairs, enforces a hard maximum of two, and deletes the entire capacity unit after idle. Use the one-VM-per-job compatibility adapter when a workload requires a stronger VM boundary.
 
 Choose a conservative limit:
 

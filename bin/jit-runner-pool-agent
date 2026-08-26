@@ -15,7 +15,7 @@ Required environment:
   JIT_POOL_ENROLLMENT_TOKEN one-time 43-character base64url enrollment credential
 
 Optional environment:
-  JIT_POOL_MAX_RUNNERS     Concurrent runner slots (default: 2, maximum: 4)
+  JIT_POOL_MAX_RUNNERS     Concurrent runner slots (default: 2, maximum: 2)
   JIT_POOL_RUNNER_IMAGE    Local runner image (default: jit-runner-kit/runner:local)
   JIT_POOL_DIND_IMAGE      Immutable DinD image reference
   JIT_POOL_POLL_SECONDS    Idle polling interval (default: 3)
@@ -266,7 +266,7 @@ main() {
   export JIT_POOL_RUNNER_MEMORY JIT_POOL_DIND_MEMORY
 
   is_positive_integer "$JIT_POOL_MAX_RUNNERS" || die "JIT_POOL_MAX_RUNNERS must be a positive integer"
-  ((JIT_POOL_MAX_RUNNERS <= 4)) || die "JIT_POOL_MAX_RUNNERS must not exceed 4"
+  ((JIT_POOL_MAX_RUNNERS <= 2)) || die "JIT_POOL_MAX_RUNNERS must not exceed 2"
   is_positive_integer "$JIT_POOL_POLL_SECONDS" || die "JIT_POOL_POLL_SECONDS must be a positive integer"
   is_positive_integer "$JIT_POOL_IDLE_SECONDS" || die "JIT_POOL_IDLE_SECONDS must be a positive integer"
   ((JIT_POOL_IDLE_SECONDS >= 300 && JIT_POOL_IDLE_SECONDS <= 3600)) || \

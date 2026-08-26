@@ -2,6 +2,27 @@ import { describe, expect, it, vi } from "vitest";
 import { HetznerComputeProvider } from "../packages/adapter-compute-hetzner/src/index";
 
 describe("Hetzner compute adapter", () => {
+  it("invokes a native-style fetcher without an instance receiver", async () => {
+    const receivers: unknown[] = [];
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const fetcher = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+      receivers.push(this);
+      signals.push(init?.signal);
+      const url = String(input);
+      if (url.includes("/servers?")) return Promise.resolve(response({ servers: [], meta: pageEnd() }));
+      if (url.includes("/firewalls?")) return Promise.resolve(response({ firewalls: [], meta: pageEnd() }));
+      if (url.includes("/primary_ips?")) return Promise.resolve(response({ primary_ips: [], meta: pageEnd() }));
+      if (url.includes("/ssh_keys?")) return Promise.resolve(response({ ssh_keys: [], meta: pageEnd() }));
+      throw new Error(`unexpected request ${url}`);
+    } as typeof fetch;
+
+    await new HetznerComputeProvider({ token: "test" }, fetcher).listExpired(1_000);
+
+    expect(receivers.length).toBeGreaterThan(0);
+    expect(receivers.every((receiver) => receiver === undefined)).toBe(true);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+  });
+
   it("creates deny-inbound compute without SSH and deletes every billable resource", async () => {
     const requests: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
     const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {

@@ -314,7 +314,7 @@ export class ControllerDurableObject {
     const active = await this.jobs.listActive();
     const next = active.reduce<number | null>(
       (earliest, job) => {
-        const due = job.state === "provisioning"
+        const due = ["provisioning", "awaiting-bootstrap", "bootstrapping"].includes(job.state)
           ? Math.min(job.expiresAt, job.updatedAt + this.config.provisioningTimeoutSeconds)
           : job.expiresAt;
         return earliest === null || due < earliest ? due : earliest;
@@ -502,7 +502,7 @@ function readControllerConfig(env: Env): ControllerConfig {
     ttlSeconds - 1,
   );
   return {
-    maxRunners: boundedInteger(env.MAX_RUNNERS, "MAX_RUNNERS", 1, 20),
+    maxRunners: boundedInteger(env.MAX_RUNNERS, "MAX_RUNNERS", 1, 2),
     ttlSeconds,
     provisioningTimeoutSeconds,
     serverType: required(env.SERVER_TYPE, "SERVER_TYPE"),
@@ -533,7 +533,7 @@ function computeProvider(env: Env): HetznerComputeProvider | SharedHostComputePr
       dindImage: required(env.POOL_DIND_IMAGE, "POOL_DIND_IMAGE"),
       enrollmentToken: required(env.POOL_ENROLLMENT_TOKEN, "POOL_ENROLLMENT_TOKEN"),
       poolId: required(env.POOL_ID, "POOL_ID"),
-      maxRunners: boundedInteger(env.MAX_RUNNERS, "MAX_RUNNERS", 1, 4),
+      maxRunners: boundedInteger(env.MAX_RUNNERS, "MAX_RUNNERS", 1, 2),
       idleSeconds: boundedInteger(required(env.POOL_IDLE_SECONDS, "POOL_IDLE_SECONDS"), "POOL_IDLE_SECONDS", 300, 3600),
     });
   }
@@ -609,6 +609,10 @@ function errorResponse(error: unknown): Response {
     return json({ error: "retryable_failure" }, 503, { "Retry-After": String(error.delaySeconds) });
   }
   if (error instanceof TerminalError) return json({ error: "request_rejected" }, 400);
-  console.error(JSON.stringify({ level: "error", event: "controller.unexpected_failure" }));
+  console.error(JSON.stringify({
+    level: "error",
+    event: "controller.unexpected_failure",
+    errorType: error instanceof Error ? error.name : typeof error,
+  }));
   return json({ error: "internal_error" }, 500);
 }

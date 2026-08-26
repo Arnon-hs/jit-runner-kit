@@ -89,7 +89,7 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
   const ttl = integer(vars.TTL_SECONDS);
   const provisioningTimeout = integer(vars.PROVISIONING_TIMEOUT_SECONDS);
   const runnerGroupId = integer(vars.RUNNER_GROUP_ID);
-  if (maxRunners < 1 || maxRunners > 20) issues.push("MAX_RUNNERS must be between 1 and 20");
+  if (maxRunners < 1 || maxRunners > 2) issues.push("MAX_RUNNERS must be between 1 and 2");
   const computeMode = String(vars.COMPUTE_MODE ?? "");
   if (!["hetzner-ephemeral", "shared-host", "hetzner-pool"].includes(computeMode)) {
     issues.push("COMPUTE_MODE must be hetzner-ephemeral, shared-host, or hetzner-pool");
@@ -99,10 +99,8 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
     const hostIpv4 = String(vars.POOL_HOST_IPV4 ?? "");
     if (!/^[a-z0-9][a-z0-9-]{0,62}$/i.test(hostId)) issues.push("POOL_HOST_ID is invalid for shared-host mode");
     if (!isIpv4(hostIpv4)) issues.push("POOL_HOST_IPV4 is invalid for shared-host mode");
-    if (maxRunners > 4) issues.push("MAX_RUNNERS must not exceed 4 in shared-host mode");
   }
   if (computeMode === "hetzner-pool") {
-    if (maxRunners > 4) issues.push("MAX_RUNNERS must not exceed 4 in hetzner-pool mode");
     const idleSeconds = integer(vars.POOL_IDLE_SECONDS);
     if (idleSeconds < 300 || idleSeconds > 3600) {
       issues.push("POOL_IDLE_SECONDS must be between 300 and 3600 in hetzner-pool mode");

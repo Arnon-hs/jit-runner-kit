@@ -20,6 +20,16 @@ controller_help="$($CONTROLLER --help)"
 pool_help="$($POOL_AGENT --help)"
 [[ "$pool_help" == *"jit-runner-pool-agent"* ]]
 [[ "$pool_help" == *"Docker-in-Docker"* ]]
+grep -Fxq 'ProtectSystem=strict' "${ROOT_DIR}/providers/shared-host/jit-runner-pool-agent.service"
+grep -Fxq 'StateDirectory=jit-runner-kit' "${ROOT_DIR}/providers/shared-host/jit-runner-pool-agent.service"
+grep -Fxq 'StateDirectoryMode=0700' "${ROOT_DIR}/providers/shared-host/jit-runner-pool-agent.service"
+
+set +e
+pool_limit_output="$(JIT_POOL_CONTROLLER_URL=https://controller.example.test JIT_POOL_MAX_RUNNERS=3 "$POOL_AGENT" --once 2>&1)"
+pool_limit_status=$?
+set -e
+[[ $pool_limit_status -ne 0 ]]
+[[ "$pool_limit_output" == *"JIT_POOL_MAX_RUNNERS must not exceed 2"* ]]
 
 set +e
 invalid_output="$($CLI provision --repository 'not a repository' 2>&1)"

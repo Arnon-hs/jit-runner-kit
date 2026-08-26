@@ -46,6 +46,8 @@ interface WorkflowJobsResponse {
   jobs: Array<{ id: number; status: string; labels: string[] }>;
 }
 
+const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
+
 export class GithubAppRunnerControl implements RunnerControl {
   private readonly apiUrl: string;
   private readonly apiVersion: string;
@@ -214,16 +216,23 @@ export class GithubAppRunnerControl implements RunnerControl {
     init: RequestInit,
     allowMissing = false,
   ): Promise<T> {
-    const response = await this.fetcher(`${this.apiUrl}${path}`, {
-      ...init,
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "User-Agent": "jit-runner-kit-cloudflare",
-        "X-GitHub-Api-Version": this.apiVersion,
-      },
-    });
+    let response: Response;
+    try {
+      const fetcher = this.fetcher;
+      response = await fetcher(`${this.apiUrl}${path}`, {
+        ...init,
+        signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          "User-Agent": "jit-runner-kit-cloudflare",
+          "X-GitHub-Api-Version": this.apiVersion,
+        },
+      });
+    } catch {
+      throw new RetryableError("GitHub API transport failure", 30);
+    }
     if (response.ok) {
       return (response.status === 204 ? undefined : await response.json()) as T;
     }

@@ -32,6 +32,9 @@ interface HetznerPrimaryIp {
   labels: Record<string, string>;
 }
 
+const ORPHAN_CREATION_GRACE_SECONDS = 300;
+const PROVIDER_REQUEST_TIMEOUT_MS = 30_000;
+
 /**
  * One elastic Hetzner host shared by a bounded number of disposable runner
  * containers. Per-job cleanup is intentionally a no-op; idle or TTL cleanup
@@ -59,20 +62,29 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
       return await this.toJobResource(servers[0], request, expiresAt);
     }
 
-    const existingFirewalls = await this.list<HetznerFirewall>("firewalls");
+    const [existingFirewalls, existingIps] = await Promise.all([
+      this.list<HetznerFirewall>("firewalls"),
+      this.list<HetznerPrimaryIp>("primary_ips"),
+    ]);
     if (existingFirewalls.length > 1) throw new TerminalError("pool invariant violated: more than one firewall exists");
+    if (existingIps.length > 1) throw new TerminalError("pool invariant violated: more than one Primary IPv4 exists");
     const existingFirewall = existingFirewalls[0];
-    if (existingFirewall) {
+    const existingIp = existingIps[0];
+    if (existingFirewall || existingIp) {
       const recovered = await this.recoverSingleHost();
       if (recovered) {
         await this.refreshExpiry(recovered, expiresAt);
         return this.jobResource(recovered, existingFirewall, request, expiresAt);
       }
-      const createdAt = Number(existingFirewall.labels.created_at) || 0;
-      if (createdAt + 120 > Math.floor(Date.now() / 1000)) {
+      const createdAt = Math.max(
+        Number(existingFirewall?.labels.created_at) || 0,
+        Number(existingIp?.labels.created_at) || 0,
+      );
+      if (createdAt + ORPHAN_CREATION_GRACE_SECONDS > Math.floor(Date.now() / 1000)) {
         throw new RetryableError("pool host creation outcome is still ambiguous", 30);
       }
-      await this.deleteId("firewalls", existingFirewall.id);
+      if (existingIp) await this.deleteId("primary_ips", existingIp.id);
+      if (existingFirewall) await this.deleteId("firewalls", existingFirewall.id);
     }
 
     const labels = poolLabels(this.config.poolId, expiresAt, request.repository, Math.floor(Date.now() / 1000));
@@ -82,6 +94,31 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
         body: JSON.stringify({ name: `jrk-${this.config.poolId}-deny-inbound`, labels, rules: [] }),
       })
     ).firewall;
+
+    let primaryIp: HetznerPrimaryIp;
+    try {
+      primaryIp = (
+        await this.request<{ primary_ip: HetznerPrimaryIp }>("/primary_ips", {
+          method: "POST",
+          body: JSON.stringify({
+            name: `jrk-${this.config.poolId}-ipv4`,
+            type: "ipv4",
+            location: request.location,
+            auto_delete: false,
+            labels,
+          }),
+        })
+      ).primary_ip;
+    } catch (error) {
+      if (error instanceof RetryableError) {
+        const recovered = await this.recoverSinglePrimaryIp();
+        if (recovered) primaryIp = recovered;
+        else throw new RetryableError("pool Primary IPv4 create outcome remains ambiguous", 30);
+      } else {
+        await this.deleteId("firewalls", firewall.id);
+        throw error;
+      }
+    }
 
     let server: HetznerServer | undefined;
     try {
@@ -96,13 +133,14 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
             labels,
             user_data: cloudInit(request, this.config),
             firewalls: [{ firewall: firewall.id }],
-            public_net: { enable_ipv4: true, enable_ipv6: false },
+            public_net: { enable_ipv4: true, enable_ipv6: false, ipv4: primaryIp.id },
             start_after_create: true,
           }),
         })
       ).server;
     } catch (error) {
       if (!(error instanceof RetryableError)) {
+        await this.deleteId("primary_ips", primaryIp.id);
         await this.deleteId("firewalls", firewall.id);
         throw error;
       }
@@ -111,12 +149,9 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     }
 
     try {
+      if (!server.public_net.ipv4) server.public_net.ipv4 = { id: primaryIp.id, ip: primaryIp.ip };
       const ipv4 = server.public_net.ipv4;
       if (!ipv4) throw new TerminalError("Hetzner pool host has no public IPv4");
-      await this.request(`/primary_ips/${ipv4.id}`, {
-        method: "PUT",
-        body: JSON.stringify({ labels }),
-      });
       return this.jobResource(server, firewall, request, expiresAt);
     } catch (error) {
       await this.deleteHost(this.hostResource(server, firewall));
@@ -132,7 +167,10 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
   async releaseIdleHost(sourceIp: string): Promise<boolean> {
     const servers = await this.list<HetznerServer>("servers");
     const server = servers.find((candidate) => candidate.public_net.ipv4?.ip === sourceIp);
-    if (!server) return false;
+    if (!server) {
+      if (servers.length > 0) return false;
+      return (await this.deleteOrphanProviderObjects(Math.floor(Date.now() / 1000))) > 0;
+    }
     await this.deleteHost(this.hostResource(server, (await this.list<HetznerFirewall>("firewalls"))[0]));
     return true;
   }
@@ -210,6 +248,16 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     return undefined;
   }
 
+  private async recoverSinglePrimaryIp(): Promise<HetznerPrimaryIp | undefined> {
+    for (const delay of [0, 100, 250, 500, 1_000, 2_000]) {
+      if (delay > 0) await this.sleep(delay);
+      const ips = await this.list<HetznerPrimaryIp>("primary_ips");
+      if (ips.length > 1) throw new TerminalError("pool invariant violated: more than one Primary IPv4 exists");
+      if (ips[0]) return ips[0];
+    }
+    return undefined;
+  }
+
   private async deleteHost(resource: ComputeResource): Promise<void> {
     const errors: unknown[] = [];
     for (const [kind, id] of [
@@ -223,17 +271,25 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     if (errors.length > 0) throw new RetryableError(`pool cleanup left ${errors.length} provider object(s)`, 30);
   }
 
-  private async deleteOrphanProviderObjects(now = Number.POSITIVE_INFINITY): Promise<void> {
+  private async deleteOrphanProviderObjects(now: number): Promise<number> {
     const [firewalls, ips] = await Promise.all([
       this.list<HetznerFirewall>("firewalls"),
       this.list<HetznerPrimaryIp>("primary_ips"),
     ]);
+    let deleted = 0;
     for (const firewall of firewalls) {
-      if (expired(firewall.labels, now)) await this.deleteId("firewalls", firewall.id);
+      if (orphanCleanupDue(firewall.labels, now)) {
+        await this.deleteId("firewalls", firewall.id);
+        deleted += 1;
+      }
     }
     for (const ip of ips) {
-      if (expired(ip.labels, now)) await this.deleteId("primary_ips", ip.id);
+      if (orphanCleanupDue(ip.labels, now)) {
+        await this.deleteId("primary_ips", ip.id);
+        deleted += 1;
+      }
     }
+    return deleted;
   }
 
   private async list<T>(resource: string): Promise<T[]> {
@@ -250,12 +306,14 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
   private async request<T = unknown>(path: string, init: RequestInit, allowMissing = false): Promise<T> {
     let response: Response;
     try {
-      response = await this.fetcher(`${this.apiUrl}${path}`, {
+      const fetcher = this.fetcher;
+      response = await fetcher(`${this.apiUrl}${path}`, {
         ...init,
+        signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
         headers: { Authorization: `Bearer ${this.config.token}`, "Content-Type": "application/json" },
       });
-    } catch (error) {
-      throw new RetryableError(`Hetzner API transport failure: ${message(error)}`, 30);
+    } catch {
+      throw new RetryableError("Hetzner API transport failure", 30);
     }
     if (response.ok) return response.status === 204 ? undefined as T : await response.json() as T;
     if (allowMissing && response.status === 404) return undefined as T;
@@ -283,8 +341,8 @@ function validateConfig(config: HetznerPoolConfig): void {
   if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(config.poolId)) throw new Error("poolId is invalid");
   if (!isImmutableImage(config.runnerImage)) throw new Error("runnerImage must use a safe immutable digest reference");
   if (!isImmutableImage(config.dindImage)) throw new Error("dindImage must use a safe immutable digest reference");
-  if (!Number.isInteger(config.maxRunners) || config.maxRunners < 1 || config.maxRunners > 4) {
-    throw new Error("maxRunners must be between 1 and 4");
+  if (!Number.isInteger(config.maxRunners) || config.maxRunners < 1 || config.maxRunners > 2) {
+    throw new Error("maxRunners must be between 1 and 2");
   }
   if (!Number.isInteger(config.idleSeconds) || config.idleSeconds < 300 || config.idleSeconds > 3600) {
     throw new Error("idleSeconds must be between 300 and 3600");
@@ -305,6 +363,14 @@ function poolLabels(poolId: string, expiresAt: number, repository: string, creat
 function expired(labels: Record<string, string>, now: number): boolean {
   const expiresAt = Number(labels.expires_at);
   return Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= now;
+}
+
+function orphanCleanupDue(labels: Record<string, string>, now: number): boolean {
+  if (expired(labels, now)) return true;
+  const createdAt = Number(labels.created_at);
+  return Number.isFinite(createdAt)
+    && createdAt > 0
+    && createdAt + ORPHAN_CREATION_GRACE_SECONDS <= now;
 }
 
 function cloudInit(request: ComputeCreateRequest, config: HetznerPoolConfig): string {
@@ -329,6 +395,7 @@ systemctl disable --now ssh.service ssh.socket || true
 systemctl enable --now docker
 docker pull "$runner_image"
 docker pull "$dind_image"
+install -d -m 0700 /var/lib/jit-runner-kit /var/lib/jit-runner-kit/jobs
 systemctl daemon-reload
 systemctl enable --now jit-runner-pool-agent.service
 `;
@@ -348,6 +415,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+StateDirectory=jit-runner-kit
+StateDirectoryMode=0700
 ReadWritePaths=/var/lib/jit-runner-kit /var/run/docker.sock
 
 [Install]
@@ -396,8 +465,4 @@ async function safeError(response: Response): Promise<string> {
     const body = await response.json() as { error?: { message?: string; code?: string } };
     return body.error?.message ?? body.error?.code ?? "request failed";
   } catch { return "request failed"; }
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
