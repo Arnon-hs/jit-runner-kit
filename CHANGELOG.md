@@ -28,6 +28,7 @@ All notable changes to this project are documented in this file. The format is b
 - Pool JIT configuration remains mode `0600` but is owned by the immutable non-root runner UID/GID, allowing the disposable runner container to read it without widening access or running privileged.
 - Pool provisioning waits for the asynchronous Primary IPv4 create action to reach `success` before creating the server, with bounded polling, retryable provider classification, and safe operation/status/error-code telemetry.
 - Pool DinD sidecars disable the image's automatic TLS mode explicitly, and readiness is now proven from an isolated client on the per-job network over the same plaintext Docker endpoint used by the runner.
+- The pool runner image now includes a version- and checksum-pinned GitHub CLI so reusable release workflows can query GitHub without service-specific bootstrap steps.
 
 ### Security
 
