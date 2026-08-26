@@ -74,13 +74,16 @@ describe("Cloudflare deployment preflight", () => {
     config.vars.POOL_AGENT_SHA256 = "a".repeat(64);
     config.vars.POOL_RUNNER_IMAGE = `ghcr.io/owner/runner@sha256:${"b".repeat(64)}`;
     config.vars.POOL_DIND_IMAGE = `docker:27-dind@sha256:${"c".repeat(64)}`;
+    config.vars.POOL_BOOTSTRAP_SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ7l5EFHZL3IS+N33HkgonD7hi6RCRtjKSo4EHJxKetI jrk-bootstrap-inert";
     expect(validateCloudflareConfig(config, { template: true })).toEqual([]);
 
     config.vars.POOL_IDLE_SECONDS = "60";
     config.vars.POOL_RUNNER_IMAGE = "ghcr.io/owner/runner:latest";
+    config.vars.POOL_BOOTSTRAP_SSH_PUBLIC_KEY = "ssh-rsa not-an-ed25519-key";
     expect(validateCloudflareConfig(config, { template: true })).toEqual(expect.arrayContaining([
       "POOL_IDLE_SECONDS must be between 300 and 3600 in hetzner-pool mode",
       "POOL_RUNNER_IMAGE must use an immutable digest in hetzner-pool mode",
+      "POOL_BOOTSTRAP_SSH_PUBLIC_KEY must be a single OpenSSH Ed25519 public key in hetzner-pool mode",
     ]));
   });
 });

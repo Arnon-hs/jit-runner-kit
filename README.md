@@ -15,7 +15,7 @@ Create one short-lived build host on demand, run up to two jobs in disposable ru
 
 `jit-runner-kit` is for maintainers of trusted repositories who want elastic self-hosted runners without keeping an expensive build server online. The public interface is repository-independent and contains no application deployment logic. Hetzner Cloud is the first provider driver; the provider interface is intentionally small so more drivers can be added later.
 
-> **Project status:** v0.3.0, pre-1.0 production pilot. The Cloudflare serverless adapter has completed real-cloud success, failure, cancellation, retry, TTL, two-container isolation, and scale-to-zero gates on Hetzner CX33. It now serves trusted main-branch release workflows in multiple private repositories. Keep the compatibility adapters available as an explicit rollback path and repeat the conformance gates for every installation.
+> **Project status:** v0.3.1, pre-1.0 production pilot. The Cloudflare serverless adapter has completed real-cloud success, failure, cancellation, retry, TTL, two-container isolation, and scale-to-zero gates on Hetzner CX33. It now serves trusted main-branch release workflows in multiple private repositories. Keep the compatibility adapters available as an explicit rollback path and repeat the conformance gates for every installation.
 
 ## Why it exists
 
@@ -33,7 +33,7 @@ GitHub queues one or two trusted workflow jobs
   -> at most one Hetzner VM per pool ID
   -> one disposable runner + DinD pair per job (maximum two)
   -> completed events remove JIT records and job containers
-  `-> 10-minute idle release + Durable Object alarm + Cron TTL sweep delete the host
+  `-> configurable idle release + Durable Object alarm + Cron TTL sweep delete the host
 ```
 
 The JIT configuration is never placed in cloud-init, infrastructure state, or workflow artifacts. The elastic pool pulls a repository-built runner image by immutable digest; that image verifies the official GitHub runner archive against GitHub's published SHA-256 digest while building.
@@ -58,7 +58,7 @@ After a verified cutover, the Cloudflare adapter removes the two rounded GitHub-
 
 The first serverless adapter is implemented with a verified GitHub App `workflow_job` webhook, Cloudflare Queues, a singleton SQLite Durable Object, Durable Object alarms, Cron reconciliation, and the direct Hetzner Cloud API compute adapter.
 
-In the recommended `hetzner-pool` mode it creates at most one SSH-free, deny-inbound host for an explicit pool ID. The host verifies a pinned pool agent and immutable runner/DinD images, enrolls from its provider-assigned IPv4, and accepts at most two jobs. Each job receives a new JIT registration, network, runner container, and Docker daemon. The host is deleted after 10 minutes with no active controller job; Cron/provider TTL remains independent backstop cleanup.
+In the recommended `hetzner-pool` mode it creates at most one deny-inbound host for an explicit pool ID. A short-lived, public-only Hetzner SSH-key object suppresses provider root-password generation and email; it is deleted after the server-create response, its private half must not be retained, inbound traffic remains denied, and cloud-init disables SSH. The host verifies a pinned pool agent and immutable runner/DinD images, enrolls from its provider-assigned IPv4, and accepts at most two jobs. Each job receives a new JIT registration, network, runner container, and Docker daemon. The host is deleted after the configured idle reuse window; Cron/provider TTL remains independent backstop cleanup.
 
 Cloudflare-controlled jobs include both `jit-runner` and `"jit-run-${{ github.run_id }}"`. The repository-scoped mode is the least-privilege default and supports private repositories owned by either a user or an organization: the App is installed only on served repositories, and the controller re-reads the exact workflow run and job before provisioning and before issuing JIT configuration. Organization scope is optional and adds a private runner group restricted to the exact trusted workflows. In both modes the controller accepts only configured push or manual events from the source repository, protected branches, pinned workflow paths, and exactly one matching queued JIT job.
 
@@ -163,7 +163,7 @@ bin/jit-runner inventory --require-empty
 - Never expose runner-administration or deployment secrets to untrusted pull-request code.
 - Keep runner VMs outside production networks and accounts.
 - SSH is restricted to the controller's observed public IPv4 by default.
-- Serverless mode has no SSH or local infrastructure state. The fallback mode uses a per-run SSH host key and stores its rendered private host key in sensitive OpenTofu state; protect and promptly delete that state. Neither mode stores JIT configuration in state.
+- Serverless mode exposes no SSH access and keeps no local infrastructure state. Its optional public-only bootstrap key exists only to stop Hetzner from generating and emailing a root password; the project key object is deleted immediately and no usable private key is retained. The fallback mode uses a per-run SSH host key and stores its rendered private host key in sensitive OpenTofu state; protect and promptly delete that state. Neither mode stores JIT configuration in state.
 - `if: always()` is not a cleanup guarantee. Run the TTL sweep independently.
 - Ephemeral logs disappear with the VM. Forward diagnostics before using this for high-value releases.
 - The polling controller is intentionally simple. The implemented provider-agnostic webhook architecture is documented in [Serverless controller architecture](docs/serverless-controller-architecture.md), with Cloudflare setup in [Deploy the Cloudflare controller](docs/cloudflare-controller.md).
@@ -174,7 +174,7 @@ Read the full [security policy](SECURITY.md) before operating the toolkit.
 
 Hetzner bills while a server exists, including while it is powered off. Deleting the server and Primary IPv4 stops their respective usage billing. Very short server lifetimes are rounded to at least one hour. See the [Hetzner Cloud billing FAQ](https://docs.hetzner.com/cloud/billing/faq/).
 
-The scale-to-zero pool converts several jobs in the same burst into one minimum-billed host hour instead of one minimum hour per job. `MAX_RUNNERS=2`, a ten-minute idle window, ready PRs with one consolidated push, and `concurrency.cancel-in-progress: true` on non-release CI are the recommended cost controls. A JIT runner still accepts exactly one job; reuse exists only at the temporary host/image layer.
+The scale-to-zero pool converts several jobs in the same burst into one minimum-billed host hour instead of one minimum hour per job. The provider adapter fails closed if it ever observes more than one host for the configured `POOL_ID`; `MAX_RUNNERS=2` changes only the number of isolated job containers on that one VM. Hetzner rounds every server lifecycle up to a full hour, so the template uses a 45-minute idle reuse window (`POOL_IDLE_SECONDS=2700`) for the usual short CI workload: nearby releases reuse the already-paid host instead of creating another minimum-hour lifecycle. Recalculate this window if normal jobs approach 15 minutes. Ready PRs with one consolidated push and `concurrency.cancel-in-progress: true` on non-release CI are the other recommended cost controls. A JIT runner still accepts exactly one job; reuse exists only at the temporary host/image layer.
 
 ## Development
 

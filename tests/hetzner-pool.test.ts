@@ -5,6 +5,7 @@ import { HetznerPoolComputeProvider } from "../packages/adapter-compute-hetzner-
 
 const dind = `docker:27-dind@sha256:${"a".repeat(64)}`;
 const runner = `ghcr.io/owner/runner@sha256:${"b".repeat(64)}`;
+const bootstrapSshPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ7l5EFHZL3IS+N33HkgonD7hi6RCRtjKSo4EHJxKetI jrk-bootstrap-inert";
 
 describe("elastic Hetzner pool compute adapter", () => {
   it("invokes a native-style fetcher without an instance receiver", async () => {
@@ -35,6 +36,7 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(api.serverCreates).toBe(1);
     expect(api.firewallCreates).toBe(1);
     expect(api.primaryIpCreates).toBe(1);
+    expect(api.sshKeyCreates).toBe(1);
     expect(api.ips[0]?.labels).toMatchObject({
       managed_by: "jit-runner-kit-pool",
       controller: "cloudflare",
@@ -42,6 +44,8 @@ describe("elastic Hetzner pool compute adapter", () => {
     });
     expect(api.lastServerBody?.firewalls).toEqual([{ firewall: 21 }]);
     expect(api.lastServerBody?.public_net).toEqual({ enable_ipv4: true, enable_ipv6: false, ipv4: 31 });
+    expect(api.lastServerBody?.ssh_keys).toEqual([51]);
+    expect(api.keys).toEqual([]);
     expect(String(api.lastServerBody?.user_data)).not.toContain("bootstrap-token");
     expect(String(api.lastServerBody?.user_data)).toContain("#cloud-config");
     const writtenFiles = decodeCloudInitFiles(String(api.lastServerBody?.user_data));
@@ -49,7 +53,7 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(writtenFiles).toContain("install -d -m 0700 /var/lib/jit-runner-kit");
 
     await provider.delete(first);
-    expect(api.deletes).toEqual([]);
+    expect(api.deletes).toEqual(["ssh_keys/51"]);
   });
 
   it("releases one idle host with its IPv4 and firewall and is idempotent", async () => {
@@ -57,9 +61,9 @@ describe("elastic Hetzner pool compute adapter", () => {
     const provider = createProvider(api.fetch);
     await provider.create(request("job-101"));
     expect(await provider.releaseIdleHost("198.51.100.8")).toBe(false);
-    expect(api.deletes).toEqual([]);
+    expect(api.deletes).toEqual(["ssh_keys/51"]);
     expect(await provider.releaseIdleHost("192.0.2.10")).toBe(true);
-    expect(api.deletes).toEqual(["servers/11", "primary_ips/31", "firewalls/21"]);
+    expect(api.deletes).toEqual(["ssh_keys/51", "servers/11", "primary_ips/31", "firewalls/21"]);
     expect(await provider.releaseIdleHost("192.0.2.10")).toBe(false);
   });
 
@@ -106,10 +110,11 @@ describe("elastic Hetzner pool compute adapter", () => {
     const labels = { pool_id: "canary", created_at: "600", expires_at: "9999999999" };
     api.firewalls.push({ id: 21, labels });
     api.ips.push({ id: 31, ip: "192.0.2.10", labels });
+    api.keys.push({ id: 51, labels });
 
     await createProvider(api.fetch).listExpired(1_000);
 
-    expect(api.deletes).toEqual(["firewalls/21", "primary_ips/31"]);
+    expect(api.deletes).toEqual(["firewalls/21", "primary_ips/31", "ssh_keys/51"]);
   });
 
   it("fails closed instead of creating a second pool host", async () => {
@@ -130,6 +135,94 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(resource.serverId).toBe("11");
     expect(api.serverCreates).toBe(1);
     expect(api.servers).toHaveLength(1);
+    expect(api.keys).toHaveLength(0);
+  });
+
+  it("recovers an accepted bootstrap-key create after a lost response", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.loseFirstSshKeyCreateTransportResponse = true;
+
+    await expect(createProvider(api.fetch).create(request("job-101")))
+      .resolves.toMatchObject({ serverId: "11" });
+
+    expect(api.sshKeyCreates).toBe(1);
+    expect(api.lastServerBody?.ssh_keys).toEqual([51]);
+    expect(api.keys).toEqual([]);
+  });
+
+  it("defers a transient bootstrap-key delete without discarding the billed host", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.failFirstSshKeyDelete = true;
+    const provider = createProvider(api.fetch);
+
+    await expect(provider.create(request("job-101"))).resolves.toMatchObject({ serverId: "11" });
+
+    expect(api.servers).toHaveLength(1);
+    expect(api.keys).toHaveLength(1);
+    await provider.listExpired(1_000);
+    expect(api.keys).toHaveLength(0);
+  });
+
+  it("retains the bootstrap key until the asynchronous server-create action succeeds", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.serverActionStatuses = ["running", "success"];
+
+    await expect(createProvider(api.fetch).create(request("job-101")))
+      .resolves.toMatchObject({ serverId: "11" });
+
+    expect(api.keyCountsAtServerActionRead).toEqual([1]);
+    expect(api.keys).toEqual([]);
+  });
+
+  it("preserves a provisioning host and bootstrap key when its create action is still running", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.serverActionStatuses = ["running"];
+    let now = 0;
+    const provider = createProvider(api.fetch, "canary", {
+      now: () => now,
+      sleep: async (milliseconds) => { now += milliseconds; },
+    });
+
+    await expect(provider.create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+
+    expect(api.servers).toHaveLength(1);
+    expect(api.keys).toHaveLength(1);
+    expect(api.deletes).toEqual([]);
+    expect(api.serverCreates).toBe(1);
+    await expect(provider.create(request("job-102"))).rejects.toBeInstanceOf(RetryableError);
+    expect(api.serverCreates).toBe(1);
+    expect(api.keys).toHaveLength(1);
+  });
+
+  it("cleans every provider object after a terminal server-create action", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.serverActionStatuses = ["error"];
+    api.serverActionError = { code: "invalid_input", message: "server provisioning failed" };
+
+    await expect(createProvider(api.fetch).create(request("job-101"))).rejects.toBeInstanceOf(TerminalError);
+
+    expect(api.deletes).toEqual(["servers/11", "ssh_keys/51", "primary_ips/31", "firewalls/21"]);
+    expect(api.servers).toEqual([]);
+    expect(api.keys).toEqual([]);
+    expect(api.ips).toEqual([]);
+    expect(api.firewalls).toEqual([]);
+  });
+
+  it("reuses the running host after a transient bootstrap metadata failure", async () => {
+    const api = new FakeHetznerPoolApi();
+    api.failFirstServerLabelUpdate = true;
+    const provider = createProvider(api.fetch);
+
+    await expect(provider.create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
+
+    expect(api.serverCreates).toBe(1);
+    expect(api.servers).toHaveLength(1);
+    expect(api.keys).toHaveLength(1);
+    expect(api.deletes).toEqual([]);
+
+    await expect(provider.create(request("job-101"))).resolves.toMatchObject({ serverId: "11" });
+    expect(api.serverCreates).toBe(1);
+    expect(api.keys).toEqual([]);
   });
 
   it("preserves detached capacity only when the server-create outcome is unknown", async () => {
@@ -144,6 +237,7 @@ describe("elastic Hetzner pool compute adapter", () => {
     expect(api.servers).toHaveLength(0);
     expect(api.firewalls).toHaveLength(1);
     expect(api.ips).toHaveLength(1);
+    expect(api.keys).toHaveLength(1);
     expect(api.deletes).toEqual([]);
 
     await expect(provider.create(request("job-101")))
@@ -253,7 +347,7 @@ describe("elastic Hetzner pool compute adapter", () => {
       await expect(provider.create(request("job-101"))).rejects.toBeInstanceOf(RetryableError);
 
       expect(api.serverCreates).toBe(1);
-      expect(api.deletes).toEqual(["primary_ips/31", "firewalls/21"]);
+      expect(api.deletes).toEqual(["ssh_keys/51", "primary_ips/31", "firewalls/21"]);
       expect(api.servers).toHaveLength(0);
       expect(api.firewalls).toHaveLength(0);
       expect(api.ips).toHaveLength(0);
@@ -279,7 +373,7 @@ describe("elastic Hetzner pool compute adapter", () => {
     await expect(createProvider(api.fetch).create(request("job-101"))).rejects.toBeInstanceOf(TerminalError);
 
     expect(api.serverCreates).toBe(1);
-    expect(api.deletes).toEqual(["primary_ips/31", "firewalls/21"]);
+    expect(api.deletes).toEqual(["ssh_keys/51", "primary_ips/31", "firewalls/21"]);
     expect(api.servers).toHaveLength(0);
     expect(api.firewalls).toHaveLength(0);
     expect(api.ips).toHaveLength(0);
@@ -318,6 +412,7 @@ function createProvider(
     maxRunners: 2,
     idleSeconds: 600,
     enrollmentToken: "e".repeat(43),
+    bootstrapSshPublicKey,
     poolId,
     apiUrl: "https://api.example.test/v1",
   }, fetcher, timing.sleep ?? (async () => undefined), timing.now ?? (() => Date.now()));
@@ -350,23 +445,33 @@ class FakeHetznerPoolApi {
   servers: Array<ReturnType<FakeHetznerPoolApi["makeServer"]>> = [];
   firewalls: Array<{ id: number; labels: Record<string, string> }> = [];
   ips: Array<{ id: number; ip: string; labels: Record<string, string> }> = [];
+  keys: Array<{ id: number; labels: Record<string, string> }> = [];
   serverCreates = 0;
   firewallCreates = 0;
   primaryIpCreates = 0;
+  sshKeyCreates = 0;
   actionReads = 0;
   deletes: string[] = [];
   lastServerBody: Record<string, unknown> | undefined;
   loseFirstServerCreateTransportResponse = false;
   failFirstServerCreateTransportBeforeRequest = false;
+  loseFirstSshKeyCreateTransportResponse = false;
+  failFirstSshKeyDelete = false;
+  failFirstServerLabelUpdate = false;
   primaryIpActionStatuses: Array<"running" | "success" | "error"> = ["success"];
   primaryIpActionError: { code: string; message: string } | null = null;
   actionReadFailure: { code: string; message: string } | null = null;
   serverCreateFailure: { status: number; code: string; message: string } | null = null;
   serverCreateActionStatuses: Array<"running" | "success" | "error"> = [];
+  serverActionStatuses: Array<"running" | "success" | "error"> = ["success"];
+  serverActionError: { code: string; message: string } | null = null;
+  keyCountsAtServerActionRead: number[] = [];
   private nextServerId = 11;
   private nextFirewallId = 21;
   private nextIpId = 31;
+  private nextKeyId = 51;
   private actionStatusIndex = 0;
+  private serverActionStatusIndex = 0;
 
   readonly fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = new URL(String(input));
@@ -382,6 +487,7 @@ class FakeHetznerPoolApi {
       if (path === "servers") return Response.json({ servers: scoped(this.servers) });
       if (path === "firewalls") return Response.json({ firewalls: scoped(this.firewalls) });
       if (path === "primary_ips") return Response.json({ primary_ips: scoped(this.ips) });
+      if (path === "ssh_keys") return Response.json({ ssh_keys: scoped(this.keys) });
       if (path === "actions/41") {
         this.actionReads += 1;
         if (this.actionReadFailure) {
@@ -389,6 +495,15 @@ class FakeHetznerPoolApi {
         }
         this.actionStatusIndex = Math.min(this.actionStatusIndex + 1, this.primaryIpActionStatuses.length - 1);
         return Response.json({ action: this.primaryIpAction() });
+      }
+      if (path === "actions/42") {
+        this.keyCountsAtServerActionRead.push(this.keys.length);
+        this.serverActionStatusIndex += 1;
+        const action = this.serverAction();
+        if (action.status === "success") {
+          for (const server of this.servers) server.status = "running";
+        }
+        return Response.json({ action });
       }
     }
     if (method === "POST" && path === "firewalls") {
@@ -405,6 +520,20 @@ class FakeHetznerPoolApi {
       const primaryIp = { id, ip: `192.0.2.${id - 21}`, labels: body.labels };
       this.ips.push(primaryIp);
       return Response.json({ primary_ip: primaryIp, action: this.primaryIpAction() }, { status: 201 });
+    }
+    if (method === "POST" && path === "ssh_keys") {
+      this.sshKeyCreates += 1;
+      const body = JSON.parse(String(init?.body)) as { labels: Record<string, string>; public_key: string };
+      if (body.public_key !== bootstrapSshPublicKey) {
+        return Response.json({ error: { code: "invalid_input", message: "unexpected public key" } }, { status: 422 });
+      }
+      const sshKey = { id: this.nextKeyId++, labels: body.labels };
+      this.keys.push(sshKey);
+      if (this.loseFirstSshKeyCreateTransportResponse) {
+        this.loseFirstSshKeyCreateTransportResponse = false;
+        throw new TypeError("connection reset after provider accepted SSH key");
+      }
+      return Response.json({ ssh_key: sshKey }, { status: 201 });
     }
     if (method === "POST" && path === "servers") {
       this.serverCreates += 1;
@@ -430,18 +559,29 @@ class FakeHetznerPoolApi {
       if (!primaryIp) return Response.json({ error: { message: "Primary IPv4 missing" } }, { status: 400 });
       const ipId = primaryIp.id;
       const ip = primaryIp.ip;
-      const server = this.makeServer(serverId, this.lastServerBody.labels as Record<string, string>, ipId, ip);
+      const action = this.serverAction();
+      const server = this.makeServer(
+        serverId,
+        this.lastServerBody.labels as Record<string, string>,
+        ipId,
+        ip,
+        action.status === "success" ? "running" : "initializing",
+      );
       this.servers.push(server);
       if (this.loseFirstServerCreateTransportResponse) {
         this.loseFirstServerCreateTransportResponse = false;
         throw new TypeError("connection reset after provider accepted request");
       }
-      return Response.json({ server }, { status: 201 });
+      return Response.json({ server, action }, { status: 201 });
     }
     if (method === "PUT") {
       const labels = (JSON.parse(String(init?.body)) as { labels: Record<string, string> }).labels;
       const [kind, rawId] = path.split("/");
       const id = Number(rawId);
+      if (kind === "servers" && this.failFirstServerLabelUpdate) {
+        this.failFirstServerLabelUpdate = false;
+        return Response.json({ error: { code: "unavailable", message: "temporary label failure" } }, { status: 503 });
+      }
       const target = kind === "servers"
         ? this.servers.find((item) => item.id === id)
         : kind === "primary_ips"
@@ -451,12 +591,17 @@ class FakeHetznerPoolApi {
       return new Response(null, { status: 204 });
     }
     if (method === "DELETE") {
+      if (path.startsWith("ssh_keys/") && this.failFirstSshKeyDelete) {
+        this.failFirstSshKeyDelete = false;
+        return Response.json({ error: { code: "unavailable", message: "temporary delete failure" } }, { status: 503 });
+      }
       this.deletes.push(path);
       const [kind, rawId] = path.split("/");
       const id = Number(rawId);
       if (kind === "servers") this.servers = this.servers.filter((item) => item.id !== id);
       if (kind === "primary_ips") this.ips = this.ips.filter((item) => item.id !== id);
       if (kind === "firewalls") this.firewalls = this.firewalls.filter((item) => item.id !== id);
+      if (kind === "ssh_keys") this.keys = this.keys.filter((item) => item.id !== id);
       return new Response(null, { status: 204 });
     }
     return Response.json({ error: { message: `${method} ${path} not mocked` } }, { status: 500 });
@@ -467,8 +612,9 @@ class FakeHetznerPoolApi {
     labels: Record<string, string> = { expires_at: "2600", pool_id: "canary" },
     ipId = 31,
     ip = "192.0.2.10",
+    status = "running",
   ) {
-    return { id, labels, public_net: { ipv4: { id: ipId, ip } } };
+    return { id, labels, status, public_net: { ipv4: { id: ipId, ip } } };
   }
 
   private primaryIpAction() {
@@ -478,5 +624,10 @@ class FakeHetznerPoolApi {
       status,
       error: status === "error" ? this.primaryIpActionError : null,
     };
+  }
+
+  private serverAction() {
+    const status = this.serverActionStatuses[this.serverActionStatusIndex] ?? "running";
+    return { id: 42, status, error: status === "error" ? this.serverActionError : null };
   }
 }

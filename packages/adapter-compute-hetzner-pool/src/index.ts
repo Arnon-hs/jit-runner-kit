@@ -11,6 +11,7 @@ interface HetznerPoolConfig {
   maxRunners: number;
   idleSeconds: number;
   enrollmentToken: string;
+  bootstrapSshPublicKey: string;
   poolId: string;
   apiUrl?: string;
 }
@@ -18,6 +19,7 @@ interface HetznerPoolConfig {
 interface HetznerServer {
   id: number;
   labels: Record<string, string>;
+  status: string;
   public_net: { ipv4: { id: number; ip: string } | null };
 }
 
@@ -29,6 +31,11 @@ interface HetznerFirewall {
 interface HetznerPrimaryIp {
   id: number;
   ip: string;
+  labels: Record<string, string>;
+}
+
+interface HetznerSshKey {
+  id: number;
   labels: Record<string, string>;
 }
 
@@ -88,33 +95,48 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     if (servers.length > 1) throw new TerminalError("pool invariant violated: more than one host exists");
     const expiresAt = request.expiresAt + this.config.idleSeconds;
     if (servers[0]) {
+      if (servers[0].status !== "running") {
+        throw new RetryableError("pool host is still provisioning", 30);
+      }
+      await this.markBootstrapComplete(servers[0]);
+      await this.deleteBootstrapKeysBestEffort();
       await this.refreshExpiry(servers[0], expiresAt);
       return await this.toJobResource(servers[0], request, expiresAt);
     }
 
-    const [existingFirewalls, existingIps] = await Promise.all([
+    const [existingFirewalls, existingIps, existingSshKeys] = await Promise.all([
       this.list<HetznerFirewall>("firewalls"),
       this.list<HetznerPrimaryIp>("primary_ips"),
+      this.list<HetznerSshKey>("ssh_keys"),
     ]);
     if (existingFirewalls.length > 1) throw new TerminalError("pool invariant violated: more than one firewall exists");
     if (existingIps.length > 1) throw new TerminalError("pool invariant violated: more than one Primary IPv4 exists");
+    if (existingSshKeys.length > 1) throw new TerminalError("pool invariant violated: more than one bootstrap SSH key exists");
     const existingFirewall = existingFirewalls[0];
     const existingIp = existingIps[0];
-    if (existingFirewall || existingIp) {
+    const existingSshKey = existingSshKeys[0];
+    if (existingFirewall || existingIp || existingSshKey) {
       const recovered = await this.recoverSingleHost();
       if (recovered) {
+        if (recovered.status !== "running") {
+          throw new RetryableError("pool host is still provisioning", 30);
+        }
+        await this.markBootstrapComplete(recovered);
+        if (existingSshKey) await this.deleteBootstrapKeysBestEffort();
         await this.refreshExpiry(recovered, expiresAt);
         return this.jobResource(recovered, existingFirewall, request, expiresAt);
       }
       const createdAt = Math.max(
         Number(existingFirewall?.labels.created_at) || 0,
         Number(existingIp?.labels.created_at) || 0,
+        Number(existingSshKey?.labels.created_at) || 0,
       );
       if (createdAt + ORPHAN_CREATION_GRACE_SECONDS > Math.floor(this.now() / 1000)) {
         throw new RetryableError("pool host creation outcome is still ambiguous", 30);
       }
       if (existingIp) await this.deleteId("primary_ips", existingIp.id);
       if (existingFirewall) await this.deleteId("firewalls", existingFirewall.id);
+      if (existingSshKey) await this.deleteId("ssh_keys", existingSshKey.id);
     }
 
     const labels = poolLabels(this.config.poolId, expiresAt, request.repository, Math.floor(this.now() / 1000));
@@ -166,10 +188,34 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
       }
     }
 
-    let server: HetznerServer | undefined;
+    let bootstrapSshKey: HetznerSshKey;
     try {
-      server = (
-        await this.request<{ server: HetznerServer }>("/servers", {
+      bootstrapSshKey = (
+        await this.request<{ ssh_key: HetznerSshKey }>("/ssh_keys", {
+          method: "POST",
+          body: JSON.stringify({
+            name: `jrk-${this.config.poolId}-bootstrap-inert`,
+            public_key: this.config.bootstrapSshPublicKey,
+            labels,
+          }),
+        })
+      ).ssh_key;
+    } catch (error) {
+      if (error instanceof HetznerTransportError) {
+        const recovered = await this.recoverSingleSshKey();
+        if (recovered) bootstrapSshKey = recovered;
+        else throw new RetryableError("pool bootstrap SSH key create outcome remains ambiguous", 30);
+      } else {
+        await this.deleteId("primary_ips", primaryIp.id);
+        await this.deleteId("firewalls", firewall.id);
+        throw error;
+      }
+    }
+
+    let server: HetznerServer | undefined;
+    let serverAction: HetznerAction | undefined;
+    try {
+      const created = await this.request<{ server: HetznerServer; action?: HetznerAction }>("/servers", {
           method: "POST",
           body: JSON.stringify({
             name: `jrk-${this.config.poolId}-${request.location}`,
@@ -178,23 +224,43 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
             location: request.location,
             labels,
             user_data: cloudInit(request, this.config),
+            ssh_keys: [bootstrapSshKey.id],
             firewalls: [{ firewall: firewall.id }],
             public_net: { enable_ipv4: true, enable_ipv6: false, ipv4: primaryIp.id },
             start_after_create: true,
           }),
-        })
-      ).server;
+        });
+      server = created.server;
+      serverAction = created.action;
     } catch (error) {
       if (error instanceof HetznerTransportError) {
         server = await this.recoverSingleHost();
         if (!server) throw new RetryableError("pool host create outcome remains ambiguous", 30);
       } else {
-        await this.deleteId("primary_ips", primaryIp.id);
-        await this.deleteId("firewalls", firewall.id);
+        await this.cleanupFailedProvisioning(undefined, bootstrapSshKey.id, primaryIp.id, firewall.id);
         throw error;
       }
     }
 
+    if (serverAction) {
+      try {
+        await this.waitForAction(serverAction, "server.create");
+      } catch (error) {
+        if (error instanceof HetznerActionStillRunningError) throw error;
+        await this.cleanupFailedProvisioning(server.id, bootstrapSshKey.id, primaryIp.id, firewall.id);
+        throw error;
+      }
+    } else if (server.status !== "running") {
+      throw new RetryableError("pool host create action is not observable", 30);
+    }
+
+    try {
+      await this.markBootstrapComplete(server);
+    } catch {
+      emitProviderTelemetry("server.bootstrap_complete", "deferred");
+      throw new RetryableError("pool host is running but bootstrap metadata is not yet durable", 30);
+    }
+    await this.deleteBootstrapKeysBestEffort();
     try {
       if (!server.public_net.ipv4) server.public_net.ipv4 = { id: primaryIp.id, ip: primaryIp.ip };
       const ipv4 = server.public_net.ipv4;
@@ -226,6 +292,7 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     const servers = await this.list<HetznerServer>("servers");
     if (servers.length > 1) throw new TerminalError("pool invariant violated: more than one host exists");
     const server = servers[0];
+    if (server?.status === "running") await this.deleteBootstrapKeysBestEffort();
     if (server && expired(server.labels, now)) {
       return [this.hostResource(server, (await this.list<HetznerFirewall>("firewalls"))[0])];
     }
@@ -285,6 +352,13 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     server.labels = labels;
   }
 
+  private async markBootstrapComplete(server: HetznerServer): Promise<void> {
+    if (server.labels.bootstrap_complete === "true") return;
+    const labels = { ...server.labels, bootstrap_complete: "true" };
+    await this.request(`/servers/${server.id}`, { method: "PUT", body: JSON.stringify({ labels }) });
+    server.labels = labels;
+  }
+
   private async recoverSingleHost(): Promise<HetznerServer | undefined> {
     for (const delay of [0, 100, 250, 500, 1_000, 2_000]) {
       if (delay > 0) await this.sleep(delay);
@@ -301,6 +375,16 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
       const ips = await this.list<HetznerPrimaryIp>("primary_ips");
       if (ips.length > 1) throw new TerminalError("pool invariant violated: more than one Primary IPv4 exists");
       if (ips[0]) return ips[0];
+    }
+    return undefined;
+  }
+
+  private async recoverSingleSshKey(): Promise<HetznerSshKey | undefined> {
+    for (const delay of [0, 100, 250, 500, 1_000, 2_000]) {
+      if (delay > 0) await this.sleep(delay);
+      const keys = await this.list<HetznerSshKey>("ssh_keys");
+      if (keys.length > 1) throw new TerminalError("pool invariant violated: more than one bootstrap SSH key exists");
+      if (keys[0]) return keys[0];
     }
     return undefined;
   }
@@ -358,13 +442,49 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
       if (!id) continue;
       try { await this.deleteId(kind, id); } catch (error) { errors.push(error); }
     }
+    try { await this.deleteBootstrapKeys(); } catch (error) { errors.push(error); }
     if (errors.length > 0) throw new RetryableError(`pool cleanup left ${errors.length} provider object(s)`, 30);
   }
 
+  private async cleanupFailedProvisioning(
+    serverId: number | undefined,
+    sshKeyId: number,
+    primaryIpId: number,
+    firewallId: number,
+  ): Promise<void> {
+    const errors: unknown[] = [];
+    for (const [kind, id] of [
+      ["servers", serverId],
+      ["ssh_keys", sshKeyId],
+      ["primary_ips", primaryIpId],
+      ["firewalls", firewallId],
+    ] as const) {
+      if (id === undefined) continue;
+      try { await this.deleteId(kind, id); } catch (error) { errors.push(error); }
+    }
+    if (errors.length > 0) {
+      throw new RetryableError(`failed provisioning cleanup left ${errors.length} provider object(s)`, 30);
+    }
+  }
+
+  private async deleteBootstrapKeys(): Promise<void> {
+    const keys = await this.list<HetznerSshKey>("ssh_keys");
+    for (const key of keys) await this.deleteId("ssh_keys", key.id);
+  }
+
+  private async deleteBootstrapKeysBestEffort(): Promise<void> {
+    try {
+      await this.deleteBootstrapKeys();
+    } catch {
+      emitProviderTelemetry("bootstrap_ssh_key.cleanup", "deferred");
+    }
+  }
+
   private async deleteOrphanProviderObjects(now: number): Promise<number> {
-    const [firewalls, ips] = await Promise.all([
+    const [firewalls, ips, sshKeys] = await Promise.all([
       this.list<HetznerFirewall>("firewalls"),
       this.list<HetznerPrimaryIp>("primary_ips"),
+      this.list<HetznerSshKey>("ssh_keys"),
     ]);
     let deleted = 0;
     for (const firewall of firewalls) {
@@ -376,6 +496,12 @@ export class HetznerPoolComputeProvider implements ComputeProvider {
     for (const ip of ips) {
       if (orphanCleanupDue(ip.labels, now)) {
         await this.deleteId("primary_ips", ip.id);
+        deleted += 1;
+      }
+    }
+    for (const sshKey of sshKeys) {
+      if (orphanCleanupDue(sshKey.labels, now)) {
+        await this.deleteId("ssh_keys", sshKey.id);
         deleted += 1;
       }
     }
@@ -463,6 +589,9 @@ function validateConfig(config: HetznerPoolConfig): void {
   if (!/^[A-Za-z0-9_-]{43}$/.test(config.enrollmentToken)) {
     throw new Error("enrollmentToken must be 43 base64url characters");
   }
+  if (!isEd25519PublicKey(config.bootstrapSshPublicKey)) {
+    throw new Error("bootstrapSshPublicKey must be a single OpenSSH Ed25519 public key");
+  }
   if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(config.poolId)) throw new Error("poolId is invalid");
   if (!isImmutableImage(config.runnerImage)) throw new Error("runnerImage must use a safe immutable digest reference");
   if (!isImmutableImage(config.dindImage)) throw new Error("dindImage must use a safe immutable digest reference");
@@ -471,6 +600,21 @@ function validateConfig(config: HetznerPoolConfig): void {
   }
   if (!Number.isInteger(config.idleSeconds) || config.idleSeconds < 300 || config.idleSeconds > 3600) {
     throw new Error("idleSeconds must be between 300 and 3600");
+  }
+}
+
+function isEd25519PublicKey(value: string): boolean {
+  if (value.includes("\n") || value.includes("\r")) return false;
+  const [algorithm, encoded, ...comment] = value.trim().split(" ");
+  if (algorithm !== "ssh-ed25519" || !encoded || comment.some((part) => !/^[A-Za-z0-9._@+-]+$/.test(part))) {
+    return false;
+  }
+  try {
+    const decoded = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+    const prefix = new TextEncoder().encode("\0\0\0\u000bssh-ed25519\0\0\0 ");
+    return decoded.length === 51 && prefix.every((byte, index) => decoded[index] === byte);
+  } catch {
+    return false;
   }
 }
 

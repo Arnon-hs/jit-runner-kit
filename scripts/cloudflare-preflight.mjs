@@ -119,6 +119,9 @@ export function validateCloudflareConfig(config, { template = false } = {}) {
         issues.push(`${name} must use an immutable digest in hetzner-pool mode`);
       }
     }
+    if (!isEd25519PublicKey(String(vars.POOL_BOOTSTRAP_SSH_PUBLIC_KEY ?? ""))) {
+      issues.push("POOL_BOOTSTRAP_SSH_PUBLIC_KEY must be a single OpenSSH Ed25519 public key in hetzner-pool mode");
+    }
   }
   if (ttl < 600 || ttl > 86_400) issues.push("TTL_SECONDS must be between 600 and 86400");
   if (provisioningTimeout < 30 || provisioningTimeout >= ttl) {
@@ -238,6 +241,21 @@ function isIpv4(value) {
     const parsed = Number(octet);
     return parsed >= 0 && parsed <= 255;
   });
+}
+
+function isEd25519PublicKey(value) {
+  if (value.includes("\n") || value.includes("\r")) return false;
+  const [algorithm, encoded, ...comment] = value.trim().split(" ");
+  if (algorithm !== "ssh-ed25519" || !encoded || comment.some((part) => !/^[A-Za-z0-9._@+-]+$/.test(part))) {
+    return false;
+  }
+  try {
+    const decoded = Buffer.from(encoded, "base64");
+    const prefix = Buffer.from("\0\0\0\u000bssh-ed25519\0\0\0 ", "binary");
+    return decoded.length === 51 && decoded.subarray(0, prefix.length).equals(prefix);
+  } catch {
+    return false;
+  }
 }
 
 function unique(values) {

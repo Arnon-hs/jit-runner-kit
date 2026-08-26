@@ -1,6 +1,6 @@
 # Serverless controller architecture
 
-Status: released for pre-1.0 production pilots in v0.3.0. Local conformance, offline deployment preflight, Worker bundle validation, and real-cloud lifecycle gates are complete; each installation still requires its own canary evidence.
+Status: released for pre-1.0 production pilots in v0.3.1. Local conformance, offline deployment preflight, Worker bundle validation, and real-cloud lifecycle gates are complete; each installation still requires its own canary evidence.
 
 JIT Runner Kit keeps lifecycle policy in a provider-agnostic core and puts deployment details behind adapters. Cloudflare is the first implemented controller platform and Hetzner Cloud is the first compute provider. Neither is part of the core contract.
 
@@ -61,7 +61,7 @@ The first serverless controller adapter is implemented for Cloudflare:
 - Cron triggers reconciliation and TTL cleanup.
 - encrypted Worker secrets hold installation credentials and provider tokens.
 
-The first compute adapter uses the Hetzner Cloud API. It owns Hetzner request/response translation and labels every resource with stable ownership, job, controller, repository, and expiry identifiers. Serverless VMs have a deny-inbound firewall and no SSH key.
+The first compute adapter uses the Hetzner Cloud API. It owns Hetzner request/response translation and labels every resource with stable ownership, job, controller, repository, and expiry identifiers. Serverless VMs have a deny-inbound firewall and no usable SSH credential. The elastic pool briefly registers a public-only key during server creation to prevent provider root-password email, deletes the provider key object immediately, retains no private key, and disables SSH in cloud-init.
 
 ## Serverless lifecycle
 
