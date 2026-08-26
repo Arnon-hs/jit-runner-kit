@@ -6,7 +6,14 @@ CLI="${ROOT_DIR}/bin/jit-runner"
 CONTROLLER="${ROOT_DIR}/bin/jit-runner-controller"
 POOL_AGENT="${ROOT_DIR}/bin/jit-runner-pool-agent"
 TEST_TMP="$(mktemp -d)"
-trap 'rm -rf "$TEST_TMP"' EXIT
+PERMISSION_TEST_VOLUME=""
+cleanup() {
+  if [[ -n "$PERMISSION_TEST_VOLUME" ]]; then
+    docker volume rm "$PERMISSION_TEST_VOLUME" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$TEST_TMP"
+}
+trap cleanup EXIT
 
 help_output="$($CLI --help)"
 [[ "$help_output" == *"jit-runner provision"* ]]
@@ -23,6 +30,38 @@ pool_help="$($POOL_AGENT --help)"
 grep -Fxq 'ProtectSystem=strict' "${ROOT_DIR}/providers/shared-host/jit-runner-pool-agent.service"
 grep -Fxq 'StateDirectory=jit-runner-kit' "${ROOT_DIR}/providers/shared-host/jit-runner-pool-agent.service"
 grep -Fxq 'StateDirectoryMode=0700' "${ROOT_DIR}/providers/shared-host/jit-runner-pool-agent.service"
+grep -Fq 'useradd --create-home --uid 1001 --shell /bin/bash runner' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+EXPECTED_JIT_CONFIG_PATH="\${job_dir}/jit-config"
+grep -Fq "chmod 600 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"
+grep -Fq "chown 1001:1001 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"
+if grep -Fq "chmod 0644 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"; then
+  printf 'pool JIT configuration must not be world-readable\n' >&2
+  exit 1
+fi
+write_line="$(grep -nF "printf '%s' \"\$encoded_jit_config\" >\"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT" | cut -d: -f1)"
+chmod_line="$(grep -nF "chmod 600 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT" | cut -d: -f1)"
+chown_line="$(grep -nF "chown 1001:1001 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT" | cut -d: -f1)"
+((write_line < chmod_line && chmod_line < chown_line))
+
+if command -v docker >/dev/null; then
+  PERMISSION_TEST_VOLUME="jit-runner-kit-permissions-$$"
+  [[ "$PERMISSION_TEST_VOLUME" =~ ^jit-runner-kit-permissions-[0-9]+$ ]]
+  docker volume create "$PERMISSION_TEST_VOLUME" >/dev/null
+  permission_test_image="docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
+  docker run --rm --user root --mount "type=volume,src=${PERMISSION_TEST_VOLUME},dst=/state" \
+    "$permission_test_image" sh -c "printf '%s' synthetic-jit-config >/state/jit-config; chmod 0600 /state/jit-config"
+  docker run --rm --user 1001:1001 --mount "type=volume,src=${PERMISSION_TEST_VOLUME},dst=/state,readonly" \
+    "$permission_test_image" sh -c 'test ! -r /state/jit-config'
+  docker run --rm --user root --mount "type=volume,src=${PERMISSION_TEST_VOLUME},dst=/state" \
+    "$permission_test_image" sh -c 'chown 1001:1001 /state/jit-config; chmod 0600 /state/jit-config'
+  docker run --rm --user 1001:1001 --mount "type=volume,src=${PERMISSION_TEST_VOLUME},dst=/state,readonly" \
+    "$permission_test_image" sh -c 'test -r /state/jit-config'
+  docker run --rm --user 1002:1002 --mount "type=volume,src=${PERMISSION_TEST_VOLUME},dst=/state,readonly" \
+    "$permission_test_image" sh -c 'test ! -r /state/jit-config'
+  docker volume rm "$PERMISSION_TEST_VOLUME" >/dev/null
+  PERMISSION_TEST_VOLUME=""
+fi
 
 set +e
 pool_limit_output="$(JIT_POOL_CONTROLLER_URL=https://controller.example.test JIT_POOL_MAX_RUNNERS=3 "$POOL_AGENT" --once 2>&1)"

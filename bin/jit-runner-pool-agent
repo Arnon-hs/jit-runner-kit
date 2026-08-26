@@ -126,6 +126,7 @@ run_claim() {
   chmod 700 "$job_dir"
   printf '%s' "$encoded_jit_config" >"${job_dir}/jit-config"
   chmod 600 "${job_dir}/jit-config"
+  chown 1001:1001 "${job_dir}/jit-config"
   trap 'cleanup_job "$runner_name" "$dind_name" "$network_name" "$job_dir"' RETURN
 
   docker network create --label jit-runner-kit=pool "$network_name" >/dev/null
