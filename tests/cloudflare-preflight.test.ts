@@ -8,6 +8,7 @@ import {
 const configPath = new URL("../packages/adapter-controller-cloudflare/wrangler.jsonc", import.meta.url);
 const repositoryManifestPath = new URL("../examples/github-app-repository-manifest.json", import.meta.url);
 const organizationManifestPath = new URL("../examples/github-app-manifest.json", import.meta.url);
+const productionTrustSetPath = new URL("../examples/production-controller-trust-set.json", import.meta.url);
 
 describe("Cloudflare deployment preflight", () => {
   it("keeps the committed deployment templates internally consistent", async () => {
@@ -35,6 +36,25 @@ describe("Cloudflare deployment preflight", () => {
     manifest.hook_attributes.url = "https://jit-controller.example-org.workers.dev/webhooks/github";
     expect(validateCloudflareConfig(config)).toEqual([]);
     expect(validateGithubAppManifest(manifest, { runnerScope: "organization" })).toEqual([]);
+  });
+
+  it("accepts a bounded multi-repository production trust set", async () => {
+    const config = structuredClone(await readJsonc(configPath));
+    const production = await readJsonc(productionTrustSetPath);
+    Object.assign(config.vars, production);
+    config.vars.GITHUB_ORGANIZATION = "example-org";
+    config.vars.PUBLIC_BASE_URL = "https://jit-controller.example-org.workers.dev";
+
+    expect(validateCloudflareConfig(config)).toEqual([]);
+    expect(production.MAX_RUNNERS).toBe("2");
+    expect(production.ALLOWED_REPOSITORIES.split(",")).toHaveLength(3);
+    expect(production.TRUSTED_BRANCHES).toBe("main,master");
+    expect(production.TRUSTED_WORKFLOWS).toContain(
+      "example-org/example-schema/.github/workflows/release.yml@refs/heads/main",
+    );
+    expect(production.TRUSTED_WORKFLOWS).toContain(
+      "example-org/example-media/.github/workflows/deploy.yml@refs/heads/master",
+    );
   });
 
   it("rejects legacy Durable Object migrations and workflow scope drift", async () => {

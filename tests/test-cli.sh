@@ -405,6 +405,7 @@ set -e
 
 if grep -RniE 'atlasrepo|reposearchengine' \
   --exclude-dir=.git \
+  --exclude=.git \
   --exclude=test-cli.sh \
   "$ROOT_DIR" >/dev/null; then
   printf 'application-specific content found in generic runner toolkit\n' >&2

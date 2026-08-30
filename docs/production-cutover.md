@@ -32,6 +32,14 @@ GitHub remains the workflow scheduler. Cloudflare owns runner lifecycle. Hetzner
 6. Keep `MAX_RUNNERS` at `1` for the first canary and never above `2` for the shared-host implementation.
 7. Use a dedicated Hetzner project token and keep every controller credential in Worker secrets.
 
+For a multi-repository production installation, start from the non-secret
+[`examples/production-controller-trust-set.json`](../examples/production-controller-trust-set.json)
+inventory. Apply it only after the GitHub App is installed on every listed
+repository. The App installation, `ALLOWED_REPOSITORIES`,
+`TRUSTED_BRANCHES`, and `TRUSTED_WORKFLOWS` must agree before merging a
+workflow that depends on the pool; otherwise GitHub will leave its JIT job
+queued with no eligible runner.
+
 Run the offline preflight before deployment. Read the deployed revision back after deployment and confirm the repository, workflow, branch, event, concurrency, immutable agent, and immutable image identities. An invalid signature and invalid bootstrap token must both fail closed without creating provider resources.
 
 ## 2. Collapse the release into one trusted JIT job
