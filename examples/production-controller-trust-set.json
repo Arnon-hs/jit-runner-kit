@@ -1,0 +1,6 @@
+{
+  "ALLOWED_REPOSITORIES": "example-org/example-api,example-org/example-schema,example-org/example-media",
+  "TRUSTED_BRANCHES": "main,master",
+  "TRUSTED_WORKFLOWS": "example-org/example-api/.github/workflows/release.yml@refs/heads/main,example-org/example-schema/.github/workflows/release.yml@refs/heads/main,example-org/example-media/.github/workflows/deploy.yml@refs/heads/master",
+  "MAX_RUNNERS": "2"
+}
