@@ -90,7 +90,7 @@ cleanup_all() {
   ids="$(docker ps --all --quiet --filter label=jit-runner-kit=pool 2>/dev/null || true)"
   if [[ -n "$ids" ]]; then
     # shellcheck disable=SC2086
-    docker rm --force $ids >/dev/null 2>&1 || true
+    docker rm --force --volumes $ids >/dev/null 2>&1 || true
   fi
   while IFS= read -r network; do
     [[ -n "$network" ]] || continue
@@ -104,8 +104,8 @@ cleanup_job() {
   local dind_name="$2"
   local network_name="$3"
   local job_dir="$4"
-  docker rm --force "$runner_name" >/dev/null 2>&1 || true
-  docker rm --force "$dind_name" >/dev/null 2>&1 || true
+  docker rm --force --volumes "$runner_name" >/dev/null 2>&1 || true
+  docker rm --force --volumes "$dind_name" >/dev/null 2>&1 || true
   docker network rm "$network_name" >/dev/null 2>&1 || true
   rm -f "${job_dir}/jit-config"
   rmdir "$job_dir" >/dev/null 2>&1 || true

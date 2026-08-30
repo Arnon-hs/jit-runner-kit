@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- Pool job cleanup now removes anonymous container volumes together with disposable runner and DinD containers, preventing nested Docker images and build caches from accumulating across reused jobs until the host disk is exhausted.
+
 ## [0.3.1] - 2026-08-27
 
 ### Fixed
