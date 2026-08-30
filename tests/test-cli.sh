@@ -20,6 +20,7 @@ help_output="$($CLI --help)"
 [[ "$help_output" == *"jit-runner destroy"* ]]
 [[ "$help_output" == *"jit-runner sweep"* ]]
 [[ "$help_output" == *"jit-runner inventory"* ]]
+[[ "$help_output" == *"jit-runner pool-cleanup"* ]]
 
 controller_help="$($CONTROLLER --help)"
 [[ "$controller_help" == *"jit-runner-controller --config"* ]]
@@ -249,11 +250,13 @@ set -e
 
 mkdir -p "$TEST_TMP/bin"
 export MOCK_CURL_LOG="$TEST_TMP/curl.log"
+export MOCK_CURL_ARGS_LOG="$TEST_TMP/curl-args.log"
 cat >"$TEST_TMP/bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 url="${*: -1}"
 printf '%s\n' "$url" >>"$MOCK_CURL_LOG"
+printf '%s\n' "$*" >>"$MOCK_CURL_ARGS_LOG"
 if [[ "$*" == *"--request GET"* && "$url" =~ /(servers|firewalls|primary_ips|ssh_keys)/[0-9]+$ ]]; then
   exit 22
 fi
@@ -347,6 +350,18 @@ PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test "$CLI" inventory 
 inventory_status=$?
 set -e
 [[ $inventory_status -ne 0 ]]
+
+pool_preview="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test \
+  "$CLI" pool-cleanup --pool-id canary)"
+[[ -z "$pool_preview" ]]
+grep -Fq 'label_selector=managed_by=jit-runner-kit-pool,pool_id=canary' "$MOCK_CURL_ARGS_LOG"
+set +e
+pool_delete_output="$(PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test \
+  "$CLI" pool-cleanup --pool-id canary --delete --confirmation WRONG 2>&1)"
+pool_delete_status=$?
+set -e
+[[ $pool_delete_status -ne 0 ]]
+[[ "$pool_delete_output" == *"pool cleanup requires exact confirmation: DELETE canary"* ]]
 
 mkdir -p "$TEST_TMP/destroy-state"
 PATH="$TEST_TMP/bin:$PATH" GITHUB_ACTIONS='' HCLOUD_TOKEN=test JIT_RUNNER_GITHUB_TOKEN=test \

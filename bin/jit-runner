@@ -23,6 +23,7 @@ Usage:
   jit-runner destroy --state-dir PATH [--run-key KEY] [--repository OWNER/REPO --runner-id ID]
   jit-runner sweep [--dry-run]
   jit-runner inventory [--require-empty]
+  jit-runner pool-cleanup --pool-id ID [--delete --confirmation "DELETE ID"]
 
 Provision options:
   --repository OWNER/REPO       Target GitHub repository (required)
@@ -690,6 +691,29 @@ cmd_inventory() {
   fi
 }
 
+cmd_pool_cleanup() {
+  local pool_id=""
+  local delete=false
+  local dry_run=true
+  local confirmation=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pool-id) pool_id="${2:-}"; shift 2 ;;
+      --delete) delete=true; shift ;;
+      --confirmation) confirmation="${2:-}"; shift 2 ;;
+      *) die "unknown pool-cleanup option: $1" ;;
+    esac
+  done
+  [[ "$pool_id" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || die "a valid pool ID is required for safe cleanup"
+  if [[ "$delete" == true && "$confirmation" != "DELETE ${pool_id}" ]]; then
+    die "pool cleanup requires exact confirmation: DELETE ${pool_id}"
+  fi
+  [[ "$delete" == false ]] || dry_run=false
+  for command in curl jq; do require_command "$command"; done
+  require_secret HCLOUD_TOKEN
+  delete_labeled_resources "managed_by=jit-runner-kit-pool,pool_id=${pool_id}" "$dry_run"
+}
+
 main() {
   local command="${1:-}"
   [[ -n "$command" ]] || { usage; exit 1; }
@@ -699,6 +723,7 @@ main() {
     destroy) cmd_destroy "$@" ;;
     sweep) cmd_sweep "$@" ;;
     inventory) cmd_inventory "$@" ;;
+    pool-cleanup) cmd_pool_cleanup "$@" ;;
     -h|--help|help) usage ;;
     *) die "unknown command: ${command}" ;;
   esac

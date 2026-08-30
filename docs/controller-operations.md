@@ -17,6 +17,8 @@ The recommended Cloudflare `hetzner-pool` mode uses one scale-to-zero host per e
 
 When the controller has no active job and the agent has no child runner for `POOL_IDLE_SECONDS`, the host requests its own release. The template uses 2700 seconds for short jobs because Hetzner rounds every distinct server lifecycle up to one hour; this reuses the already-paid host for nearby releases without allowing a second server. Each completed job removes its runner and DinD containers together with their anonymous volumes so nested Docker images and build caches cannot accumulate across reuse. Cloudflare rechecks controller state before Hetzner deletion. Cron and provider expiry labels remain independent backstops. The steady idle target is zero servers, firewalls, Primary IPv4s, and SSH keys. The public-only bootstrap key object exists only around server creation and is included in orphan cleanup.
 
+If an idle pool host must be replaced before its configured idle window, use the manual `Pool recovery cleanup` workflow. Preview is the default. Deletion requires the exact pool ID and the confirmation text `DELETE <pool-id>`. Verify first that every trusted repository has zero queued or in-progress JIT jobs, then run preview, inspect the label-scoped resources, and only then request deletion. The command cannot target unlabeled or differently labeled resources.
+
 The compatibility polling controller has a different cost model:
 
 `max_runners` is the polling controller's global concurrency limit:

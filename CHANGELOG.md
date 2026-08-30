@@ -8,6 +8,10 @@ All notable changes to this project are documented in this file. The format is b
 
 - Pool job cleanup now removes anonymous container volumes together with disposable runner and DinD containers, preventing nested Docker images and build caches from accumulating across reused jobs until the host disk is exhausted.
 
+### Added
+
+- Operators can dry-run and explicitly confirm cleanup of one exact labeled pool through the CLI and a manually dispatched recovery workflow.
+
 ## [0.3.1] - 2026-08-27
 
 ### Fixed
