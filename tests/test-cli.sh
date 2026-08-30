@@ -72,6 +72,13 @@ if grep -Fq 'docker exec "$dind_name" docker info' "$POOL_AGENT"; then
   printf 'pool readiness must not rely on the DinD Unix socket\n' >&2
   exit 1
 fi
+[[ "$(grep -Fc 'docker rm --force --volumes' "$POOL_AGENT")" == 3 ]]
+# Match the pool agent's source literally rather than expanding its variables here.
+# shellcheck disable=SC2016
+if grep -Eq 'docker rm --force (\$ids|"\$runner_name"|"\$dind_name")' "$POOL_AGENT"; then
+  printf 'pool cleanup must remove anonymous container volumes\n' >&2
+  exit 1
+fi
 
 if command -v docker >/dev/null; then
   PERMISSION_TEST_VOLUME="jit-runner-kit-permissions-$$"
@@ -216,8 +223,8 @@ run_pool_agent_case() {
     printf 'pool readiness unexpectedly used docker exec\n' >&2
     exit 1
   fi
-  grep -Fq -- 'rm --force jrk-runner-4242' "$case_root/docker.log"
-  grep -Fq -- 'rm --force jrk-dind-4242' "$case_root/docker.log"
+  grep -Fq -- 'rm --force --volumes jrk-runner-4242' "$case_root/docker.log"
+  grep -Fq -- 'rm --force --volumes jrk-dind-4242' "$case_root/docker.log"
   grep -Fq -- 'network rm jrk-4242' "$case_root/docker.log"
   [[ ! -e "$case_root/state/jobs/job-4242" ]]
 }
