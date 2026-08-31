@@ -4,8 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-31
+
 ### Fixed
 
+- Trusted jobs now wait durably across both capacity contention and retryable provisioning failures, with due-time ordered reconciliation after expired capacity holders are cleaned, instead of being lost after the Cloudflare Queue retry limit is exhausted.
 - Pool job cleanup now removes anonymous container volumes together with disposable runner and DinD containers, preventing nested Docker images and build caches from accumulating across reused jobs until the host disk is exhausted.
 
 ### Added

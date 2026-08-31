@@ -4,6 +4,7 @@ import type {
   ComputeProvider,
   ControllerConfig,
   JobRecord,
+  JobState,
   JobStore,
   LeaseStore,
   RunnerControl,
@@ -12,6 +13,9 @@ import type {
   WorkflowJobTrustPolicy,
 } from "../../contracts/src/index";
 import { RetryableError, TerminalError } from "../../contracts/src/index";
+
+export const CAPACITY_RETRY_SECONDS = 30;
+const WAITING_STATES: readonly JobState[] = ["waiting-capacity", "waiting-retry"];
 
 export interface ControllerPorts {
   jobs: JobStore;
@@ -192,12 +196,21 @@ export class Controller {
     const now = this.ports.clock.now();
     const errors: unknown[] = [];
     const active = await this.ports.jobs.listActive();
-    for (const job of active) {
+    const waiting = active
+      .filter((job) => WAITING_STATES.includes(job.state))
+      .sort((left, right) =>
+        (left.nextAttemptAt ?? left.updatedAt + CAPACITY_RETRY_SECONDS)
+        - (right.nextAttemptAt ?? right.updatedAt + CAPACITY_RETRY_SECONDS)
+        || left.createdAt - right.createdAt
+        || left.key.localeCompare(right.key));
+    let capacityCleanupFailed = false;
+
+    for (const job of active.filter((candidate) => !WAITING_STATES.includes(candidate.state))) {
       if (job.expiresAt <= now) {
         try {
           await this.cleanup(job, "job-ttl-expired");
         } catch (error) {
-          if (error instanceof CapacityLeaseError) throw error;
+          capacityCleanupFailed = true;
           errors.push(error);
           this.emitCleanupFailure(job.key, "job-ttl", error);
         }
@@ -207,6 +220,7 @@ export class Controller {
         try {
           await this.retryStaleProvisioning(job);
         } catch (error) {
+          capacityCleanupFailed = true;
           errors.push(error);
           this.emitCleanupFailure(job.key, "provisioning-recovery", error);
         }
@@ -219,9 +233,32 @@ export class Controller {
         try {
           await this.cleanupBootstrapTimeout(job);
         } catch (error) {
+          capacityCleanupFailed = true;
           errors.push(error);
           this.emitCleanupFailure(job.key, "bootstrap-timeout", error);
         }
+      }
+    }
+
+    let waitingAttempts = 0;
+    for (const job of waiting) {
+      if (job.expiresAt <= now) {
+        try {
+          await this.expireWaiting(job);
+        } catch (error) {
+          errors.push(error);
+          this.emitCleanupFailure(job.key, "waiting-ttl", error);
+        }
+        continue;
+      }
+      const nextAttemptAt = job.nextAttemptAt ?? job.updatedAt + CAPACITY_RETRY_SECONDS;
+      if (capacityCleanupFailed || nextAttemptAt > now || waitingAttempts >= this.config.maxRunners) continue;
+      waitingAttempts += 1;
+      try {
+        await this.handleQueued(job.event, true);
+      } catch (error) {
+        errors.push(error);
+        this.emitCleanupFailure(job.key, "waiting-recovery", error);
       }
     }
     try {
@@ -295,15 +332,30 @@ export class Controller {
     await this.cleanup(record, "bootstrap-timeout");
   }
 
-  private async handleQueued(event: TrustedWorkflowJobEvent): Promise<void> {
+  private async handleQueued(
+    event: TrustedWorkflowJobEvent,
+    allowWaitingPromotion = false,
+  ): Promise<void> {
     const key = jobKey(event);
     let record = await this.ports.jobs.get(key);
-    if (record && record.state !== "failed") return;
+    if (record && WAITING_STATES.includes(record.state) && !allowWaitingPromotion) return;
+    if (record && record.state !== "failed" && !WAITING_STATES.includes(record.state)) return;
 
     const now = this.ports.clock.now();
-    const expiresAt = now + this.config.ttlSeconds;
+    if (record && WAITING_STATES.includes(record.state) && record.expiresAt <= now) {
+      await this.expireWaiting(record);
+      return;
+    }
+    if (
+      record
+      && WAITING_STATES.includes(record.state)
+      && (record.nextAttemptAt ?? record.updatedAt + CAPACITY_RETRY_SECONDS) > now
+    ) return;
+    const expiresAt = record && WAITING_STATES.includes(record.state)
+      ? record.expiresAt
+      : now + this.config.ttlSeconds;
     let leaseAcquired = false;
-    if (!record || record.state === "failed") {
+    if (!record || record.state === "failed" || WAITING_STATES.includes(record.state)) {
       const next: JobRecord = {
         key,
         version: record ? record.version + 1 : 0,
@@ -322,7 +374,14 @@ export class Controller {
     try {
       leaseAcquired = await this.ports.leases.acquire("global", key, this.config.maxRunners, expiresAt);
       if (!leaseAcquired) {
-        throw new RetryableError("controller concurrency limit reached", 30);
+        if (!(await this.deferProvision(record, "waiting-capacity", CAPACITY_RETRY_SECONDS))) {
+          throw new RetryableError("job changed while waiting for capacity", 5);
+        }
+        this.ports.telemetry.emit("capacity.waiting", {
+          jobKey: key,
+          retrySeconds: CAPACITY_RETRY_SECONDS,
+        });
+        return;
       }
       this.ports.telemetry.emit("provision.phase", { jobKey: key, phase: "repository-access-start" });
       await this.ports.runners.assertRepositoryAccess(event);
@@ -357,7 +416,7 @@ export class Controller {
       }
       this.ports.telemetry.emit("compute.created", { jobKey: key, serverId: resource.serverId });
     } catch (error) {
-      await this.failProvision(record, error, leaseAcquired);
+      if (await this.finishProvisionFailure(record, error, leaseAcquired)) return;
       throw error;
     }
   }
@@ -382,17 +441,77 @@ export class Controller {
     await this.cleanup(record, "workflow-job-completed");
   }
 
-  private async failProvision(record: JobRecord, error: unknown, releaseLease: boolean): Promise<void> {
+  private async finishProvisionFailure(
+    record: JobRecord,
+    error: unknown,
+    releaseLease: boolean,
+  ): Promise<boolean> {
     const current = await this.ports.jobs.get(record.key);
-    if (!current || current.version !== record.version || current.state !== "provisioning") return;
+    if (!current || current.version !== record.version || current.state !== "provisioning") return false;
+    const retryable = !(error instanceof TerminalError);
+    const retryDelaySeconds = error instanceof RetryableError
+      ? error.delaySeconds
+      : CAPACITY_RETRY_SECONDS;
+    const deferred = retryable
+      ? await this.deferProvision(
+        current,
+        "waiting-retry",
+        retryDelaySeconds,
+        errorMessage(error),
+      )
+      : await this.ports.jobs.compareAndSet(current.key, current.version, {
+        ...current,
+        version: current.version + 1,
+        state: "failed",
+        failure: errorMessage(error),
+        updatedAt: this.ports.clock.now(),
+      });
+    if (!deferred) return false;
+    if (retryable) {
+      this.ports.telemetry.emit("provision.retry_scheduled", {
+        jobKey: record.key,
+        retrySeconds: retryDelaySeconds,
+        errorType: error instanceof Error ? error.name : "unknown",
+      });
+    }
+    if (releaseLease) {
+      try {
+        await this.ports.leases.release("global", record.key);
+      } catch (releaseError) {
+        this.emitCleanupFailure(record.key, "provision-lease", releaseError);
+      }
+    }
+    return retryable;
+  }
+
+  private async deferProvision(
+    record: JobRecord,
+    state: "waiting-capacity" | "waiting-retry",
+    delaySeconds: number,
+    failure?: string,
+  ): Promise<boolean> {
+    const now = this.ports.clock.now();
+    return await this.ports.jobs.compareAndSet(record.key, record.version, {
+      ...record,
+      version: record.version + 1,
+      state,
+      updatedAt: now,
+      nextAttemptAt: Math.min(record.expiresAt, now + Math.max(1, delaySeconds)),
+      ...(failure ? { failure } : {}),
+    });
+  }
+
+  private async expireWaiting(record: JobRecord): Promise<void> {
+    const current = await this.ports.jobs.get(record.key);
+    if (!current || !WAITING_STATES.includes(current.state)) return;
     if (!(await this.ports.jobs.compareAndSet(current.key, current.version, {
       ...current,
       version: current.version + 1,
-      state: "failed",
-      failure: errorMessage(error),
+      state: "completed",
+      failure: "waiting job TTL expired",
       updatedAt: this.ports.clock.now(),
     }))) return;
-    if (releaseLease) await this.ports.leases.release("global", record.key);
+    this.ports.telemetry.emit("job.cleaned", { jobKey: current.key, reason: "waiting-job-ttl-expired" });
   }
 
   private async cleanup(record: JobRecord, reason: string): Promise<void> {

@@ -1,6 +1,6 @@
 # Deploy the Cloudflare controller
 
-Status: v0.3.1 pre-1.0 production pilot. The adapter has completed the live-cloud gates below on Hetzner CX33 and is running trusted main-branch release workflows in multiple private repositories. Every independent installation must repeat the gates before production use.
+Status: v0.3.2 pre-1.0 production pilot. The adapter has completed the live-cloud gates below on Hetzner CX33 and is running trusted main-branch release workflows in multiple private repositories. Every independent installation must repeat the gates before production use.
 
 ## What this adapter owns
 
@@ -191,9 +191,10 @@ Until all gates pass for your installation, keep production workflows on the Git
 - Reconciliation attempts all job and provider cleanup paths even when one runner or VM deletion fails, then reports one retryable aggregate failure.
 - Capacity-lease retention is a fail-closed precondition: if Durable Object storage cannot extend it, reconciliation performs no external deletion and retries later.
 - A stale provisioning claim is retried after `PROVISIONING_TIMEOUT_SECONDS`; a failed VM deletion extends its concurrency lease until a later cleanup succeeds.
+- A trusted job that reaches the concurrency limit enters durable `waiting-capacity` state. Retryable GitHub or provider failures enter `waiting-retry` with their bounded retry delay. Duplicate external deliveries for a durable waiter are always acknowledged without changing state, even after `nextAttemptAt`; only internal reconciliation may promote it. Durable Object alarms retry only due waiters, in due-time and creation order, until the original job TTL expires; overdue backlog passes are globally paced at 30 seconds. Reconciliation cleans or retains expired capacity holders before promoting a waiter, and attempts at most `MAX_RUNNERS` waiters per pass.
 - Every provider resource carries a monotonic provisioning-attempt fence. An older, slow API call cannot adopt or delete a newer attempt's VM.
 - Completed and failed Durable Object records are pruned after a bounded retention window of at least 24 hours.
-- Queue messages retry only retryable upstream or concurrency failures. Terminal trust/auth/configuration failures are acknowledged and logged without their secret values.
+- Queue messages retry retryable upstream failures. Capacity contention is acknowledged after it is persisted in the Durable Object; terminal trust/auth/configuration failures are acknowledged and logged without their secret values.
 - Provider telemetry contains only the normalized operation, action/HTTP status, and machine-readable error code. It never records API tokens or provider response bodies.
 - Inspect the DLQ before replay. Correct the cause first; do not bulk replay unknown tasks.
 

@@ -93,13 +93,209 @@ describe("provider-agnostic controller", () => {
     expect(fixture.compute.deleted).toEqual(["server-101"]);
   });
 
-  it("enforces the global one-VM-per-job concurrency lease", async () => {
+  it("persists a capacity wait instead of exhausting finite queue retries", async () => {
     const fixture = createFixture(1);
     await fixture.controller.handleWorkflowJob(event);
-    await expect(
-      fixture.controller.handleWorkflowJob({ ...event, jobId: 102 }),
-    ).rejects.toBeInstanceOf(RetryableError);
+    await fixture.controller.exchangeBootstrap("job-101", "bootstrap-token", "192.0.2.10");
+
+    await fixture.controller.handleWorkflowJob({ ...event, jobId: 102 });
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("waiting-capacity");
+    expect((await fixture.jobs.get("job-102"))?.expiresAt).toBe(1_300);
+
+    // Keep the first job active beyond the Queue consumer's five 30-second
+    // capacity retries. Reconciliation must retain the second job durably.
+    for (const now of [1_031, 1_062, 1_093, 1_124, 1_155, 1_186]) {
+      fixture.clock.value = now;
+      await fixture.controller.reconcile();
+      expect((await fixture.jobs.get("job-102"))?.state).toBe("waiting-capacity");
+      expect((await fixture.jobs.get("job-102"))?.expiresAt).toBe(1_300);
+    }
     expect(fixture.compute.created).toHaveLength(1);
+    expect(fixture.leases.active.size).toBe(1);
+
+    await fixture.controller.handleWorkflowJob({ ...event, action: "completed" });
+    fixture.clock.value = 1_217;
+    await fixture.controller.reconcile();
+
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("awaiting-bootstrap");
+    expect(fixture.compute.created).toHaveLength(2);
+    expect(fixture.leases.active.has("job-102")).toBe(true);
+  });
+
+  it("durably retries provisioning after capacity becomes free", async () => {
+    const fixture = createFixture(1);
+    await fixture.controller.handleWorkflowJob(event);
+    await fixture.controller.exchangeBootstrap("job-101", "bootstrap-token", "192.0.2.10");
+    await fixture.controller.handleWorkflowJob({ ...event, jobId: 102 });
+    await fixture.controller.handleWorkflowJob({ ...event, action: "completed" });
+
+    fixture.runners.failNextAccess = new RetryableError("GitHub temporarily unavailable", 20);
+    fixture.clock.value = 1_031;
+    await fixture.controller.reconcile();
+    const deferred = await fixture.jobs.get("job-102");
+    expect(deferred).toMatchObject({
+      state: "waiting-retry",
+      expiresAt: 1_300,
+      nextAttemptAt: 1_051,
+    });
+    expect(fixture.leases.active.size).toBe(0);
+    expect(fixture.runners.accessChecks).toBe(2);
+
+    fixture.clock.value = 1_050;
+    await fixture.controller.reconcile();
+    expect(fixture.runners.accessChecks).toBe(2);
+    expect(fixture.compute.created).toHaveLength(1);
+
+    fixture.clock.value = 1_051;
+    await fixture.controller.reconcile();
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("awaiting-bootstrap");
+    expect(fixture.runners.accessChecks).toBe(3);
+    expect(fixture.compute.created.map(({ jobKey }) => jobKey)).toEqual(["job-101", "job-102"]);
+    expect(fixture.leases.active.size).toBe(1);
+  });
+
+  it.each(["waiting-capacity", "waiting-retry"] as const)(
+    "acks a due duplicate %s delivery without changing durable state",
+    async (state) => {
+      const fixture = createFixture(1);
+      const waiting: JobRecord = {
+        key: "job-102",
+        version: 7,
+        state,
+        event: { ...event, jobId: 102 },
+        createdAt: 900,
+        updatedAt: 1_000,
+        expiresAt: 1_300,
+        nextAttemptAt: 1_100,
+        ...(state === "waiting-retry" ? { failure: "GitHub temporarily unavailable" } : {}),
+      };
+      await fixture.jobs.compareAndSet("job-102", null, waiting);
+
+      fixture.clock.value = 1_100;
+      await fixture.controller.handleWorkflowJob({
+        ...event,
+        deliveryId: "00000000-0000-4000-8000-000000000099",
+        jobId: 102,
+      });
+
+      expect(await fixture.jobs.get("job-102")).toEqual(waiting);
+      expect(fixture.runners.accessChecks).toBe(0);
+      expect(fixture.compute.created).toHaveLength(0);
+      expect(fixture.leases.active.size).toBe(0);
+    },
+  );
+
+  it("cleans an expired capacity holder before promoting a reversed-order waiter", async () => {
+    const fixture = createFixture(1);
+    await fixture.jobs.compareAndSet("job-102", null, {
+      key: "job-102",
+      version: 0,
+      state: "waiting-capacity",
+      event: { ...event, jobId: 102 },
+      createdAt: 1_001,
+      updatedAt: 1_000,
+      expiresAt: 1_300,
+      nextAttemptAt: 1_000,
+    });
+    await fixture.jobs.compareAndSet("job-101", null, {
+      key: "job-101",
+      version: 0,
+      state: "running",
+      event,
+      createdAt: 900,
+      updatedAt: 900,
+      expiresAt: 1_050,
+      runnerId: 9001,
+      compute: {
+        provider: "hetzner",
+        serverId: "server-101",
+        publicIpv4: "192.0.2.10",
+        expiresAt: 1_050,
+        jobKey: "job-101",
+      },
+    });
+    await fixture.leases.acquire("global", "job-101", 1, 1_050);
+
+    fixture.clock.value = 1_060;
+    const waiterBeforeDuplicate = await fixture.jobs.get("job-102");
+    await fixture.controller.handleWorkflowJob({
+      ...event,
+      deliveryId: "00000000-0000-4000-8000-000000000098",
+      jobId: 102,
+    });
+    expect(await fixture.jobs.get("job-102")).toEqual(waiterBeforeDuplicate);
+    expect(fixture.compute.operations).toEqual([]);
+    expect(fixture.runners.accessChecks).toBe(0);
+    expect([...fixture.leases.active.keys()]).toEqual(["job-101"]);
+
+    fixture.compute.failDelete = true;
+    await expect(fixture.controller.reconcile()).rejects.toBeInstanceOf(RetryableError);
+    expect(fixture.compute.operations).toEqual([]);
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("waiting-capacity");
+    expect([...fixture.leases.active.keys()]).toEqual(["job-101"]);
+
+    fixture.compute.failDelete = false;
+    await fixture.controller.reconcile();
+
+    expect(fixture.compute.operations).toEqual(["delete:server-101", "create:job-102"]);
+    expect((await fixture.jobs.get("job-101"))?.state).toBe("completed");
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("awaiting-bootstrap");
+    expect([...fixture.leases.active.keys()]).toEqual(["job-102"]);
+  });
+
+  it("promotes at most maxRunners due waiters in stable creation order", async () => {
+    const fixture = createFixture(1);
+    for (const [jobId, createdAt] of [[103, 1_003], [102, 1_002]] as const) {
+      await fixture.jobs.compareAndSet(`job-${jobId}`, null, {
+        key: `job-${jobId}`,
+        version: 0,
+        state: "waiting-capacity",
+        event: { ...event, jobId },
+        createdAt,
+        updatedAt: 1_000,
+        expiresAt: 1_300,
+        nextAttemptAt: 1_000,
+      });
+    }
+
+    const laterWaiter = await fixture.jobs.get("job-103");
+    await fixture.controller.handleWorkflowJob({
+      ...event,
+      deliveryId: "00000000-0000-4000-8000-000000000097",
+      jobId: 103,
+    });
+    expect(await fixture.jobs.get("job-103")).toEqual(laterWaiter);
+
+    await fixture.controller.reconcile();
+
+    expect(fixture.compute.created.map(({ jobKey }) => jobKey)).toEqual(["job-102"]);
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("awaiting-bootstrap");
+    expect((await fixture.jobs.get("job-103"))?.state).toBe("waiting-capacity");
+  });
+
+  it("expires a durable waiter without acquiring capacity or creating compute", async () => {
+    const fixture = createFixture(1);
+    await fixture.jobs.compareAndSet("job-102", null, {
+      key: "job-102",
+      version: 0,
+      state: "waiting-capacity",
+      event: { ...event, jobId: 102 },
+      createdAt: 900,
+      updatedAt: 970,
+      expiresAt: 1_000,
+      nextAttemptAt: 1_000,
+    });
+
+    fixture.clock.value = 1_001;
+    await fixture.controller.reconcile();
+
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("completed");
+    expect(fixture.compute.created).toHaveLength(0);
+    expect(fixture.leases.active.size).toBe(0);
+    expect(fixture.telemetryEvents).toContainEqual({
+      name: "job.cleaned",
+      attributes: { jobKey: "job-102", reason: "waiting-job-ttl-expired" },
+    });
   });
 
   it("claims at most one waiting job per shared-host request without deleting the host", async () => {
@@ -296,9 +492,8 @@ describe("provider-agnostic controller", () => {
     fixture.clock.value = 2_000;
     const cleanup = fixture.controller.reconcile();
     await fixture.compute.waitUntilDeleteStarted();
-    await expect(
-      fixture.controller.handleWorkflowJob({ ...event, jobId: 102 }),
-    ).rejects.toBeInstanceOf(RetryableError);
+    await fixture.controller.handleWorkflowJob({ ...event, jobId: 102 });
+    expect((await fixture.jobs.get("job-102"))?.state).toBe("waiting-capacity");
     fixture.compute.resumeDelete();
     await cleanup;
     expect(fixture.leases.active.size).toBe(0);
@@ -480,6 +675,7 @@ class MemoryComputeProvider implements ComputeProvider {
   readonly created: ComputeCreateRequest[] = [];
   readonly deleted: string[] = [];
   readonly expired: ComputeResource[] = [];
+  readonly operations: string[] = [];
   failDelete = false;
   private createStarted: (() => void) | undefined;
   private createStartedPromise: Promise<void> | undefined;
@@ -502,6 +698,7 @@ class MemoryComputeProvider implements ComputeProvider {
   async waitUntilDeleteStarted() { await this.deleteStartedPromise; }
   resumeDelete() { this.resumeDeleteCallback?.(); }
   async create(request: ComputeCreateRequest) {
+    this.operations.push(`create:${request.jobKey}`);
     this.created.push(request);
     this.createStarted?.();
     if (this.createGate) await this.createGate;
@@ -519,6 +716,7 @@ class MemoryComputeProvider implements ComputeProvider {
     this.deleteStarted?.();
     if (this.deleteGate) await this.deleteGate;
     if (this.failDelete) throw new Error("compute delete failed");
+    this.operations.push(`delete:${resource.serverId}`);
     this.deleted.push(resource.serverId);
   }
   async listExpired() { return this.expired.splice(0); }
@@ -574,8 +772,17 @@ class MemoryElasticPoolProvider implements ComputeProvider {
 class MemoryRunnerControl implements RunnerControl {
   readonly deleted: number[] = [];
   created = 0;
+  accessChecks = 0;
+  failNextAccess: Error | undefined;
   failDelete = false;
-  async assertRepositoryAccess() {}
+  async assertRepositoryAccess() {
+    this.accessChecks += 1;
+    if (this.failNextAccess) {
+      const error = this.failNextAccess;
+      this.failNextAccess = undefined;
+      throw error;
+    }
+  }
   async createJitConfiguration(): Promise<JitConfiguration> {
     this.created += 1;
     return { encodedJitConfig: "encoded-jit-config", runnerId: 9001 };

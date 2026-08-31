@@ -1,6 +1,6 @@
 # Serverless controller architecture
 
-Status: released for pre-1.0 production pilots in v0.3.1. Local conformance, offline deployment preflight, Worker bundle validation, and real-cloud lifecycle gates are complete; each installation still requires its own canary evidence.
+Status: released for pre-1.0 production pilots in v0.3.2. Local conformance, offline deployment preflight, Worker bundle validation, and real-cloud lifecycle gates are complete; each installation still requires its own canary evidence.
 
 JIT Runner Kit keeps lifecycle policy in a provider-agnostic core and puts deployment details behind adapters. Cloudflare is the first implemented controller platform and Hetzner Cloud is the first compute provider. Neither is part of the core contract.
 
