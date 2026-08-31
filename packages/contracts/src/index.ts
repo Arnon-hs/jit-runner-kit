@@ -31,6 +31,8 @@ export type ControllerTask = WorkflowJobTask | ReconcileTask;
 
 export type JobState =
   | "provisioning"
+  | "waiting-capacity"
+  | "waiting-retry"
   | "awaiting-bootstrap"
   | "bootstrapping"
   | "running"
@@ -56,6 +58,7 @@ export interface JobRecord {
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  nextAttemptAt?: number;
   bootstrapTokenHash?: string;
   compute?: ComputeResource;
   runnerId?: number;

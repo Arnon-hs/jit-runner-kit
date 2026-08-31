@@ -15,7 +15,7 @@ Create one short-lived build host on demand, run up to two jobs in disposable ru
 
 `jit-runner-kit` is for maintainers of trusted repositories who want elastic self-hosted runners without keeping an expensive build server online. The public interface is repository-independent and contains no application deployment logic. Hetzner Cloud is the first provider driver; the provider interface is intentionally small so more drivers can be added later.
 
-> **Project status:** v0.3.1, pre-1.0 production pilot. The Cloudflare serverless adapter has completed real-cloud success, failure, cancellation, retry, TTL, two-container isolation, and scale-to-zero gates on Hetzner CX33. It now serves trusted main-branch release workflows in multiple private repositories. Keep the compatibility adapters available as an explicit rollback path and repeat the conformance gates for every installation.
+> **Project status:** v0.3.2, pre-1.0 production pilot. The Cloudflare serverless adapter has completed real-cloud success, failure, cancellation, retry, TTL, two-container isolation, and scale-to-zero gates on Hetzner CX33. It now serves trusted main-branch release workflows in multiple private repositories. Keep the compatibility adapters available as an explicit rollback path and repeat the conformance gates for every installation.
 
 ## Why it exists
 

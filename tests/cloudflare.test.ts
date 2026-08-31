@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import packageMetadata from "../package.json";
 import worker, {
   controllerVersion,
+  nextControllerAlarmAt,
   SerialOperationGate,
   type Env,
 } from "../packages/adapter-controller-cloudflare/src/index";
+import type { JobRecord } from "../packages/contracts/src/index";
 
 const secret = "test-webhook-secret";
 
@@ -245,6 +247,58 @@ describe("Cloudflare controller mutation serialization", () => {
     await expect(first).rejects.toThrow("expected failure");
     await second;
     expect(trace).toEqual(["first:start", "first:end", "second:start", "second:end"]);
+  });
+});
+
+describe("Cloudflare controller alarm scheduling", () => {
+  it("uses a waiter's explicit due time and never schedules past its TTL", () => {
+    const waiting = {
+      key: "job-102",
+      version: 1,
+      state: "waiting-retry",
+      event: {
+        deliveryId: "00000000-0000-4000-8000-000000000002",
+        action: "queued",
+        jobId: 102,
+        runId: 51,
+        installationId: 7,
+        repository: { id: 3, fullName: "owner/repository" },
+        headBranch: "main",
+        labels: ["self-hosted", "jit-runner", "jit-run-51"],
+      },
+      createdAt: 1_000,
+      updatedAt: 1_020,
+      expiresAt: 1_300,
+      nextAttemptAt: 1_075,
+    } satisfies JobRecord;
+
+    expect(nextControllerAlarmAt([waiting], 300, 1_050)).toBe(1_075);
+    expect(nextControllerAlarmAt([{ ...waiting, nextAttemptAt: 1_400 }], 300, 1_050)).toBe(1_300);
+    expect(nextControllerAlarmAt([], 300, 1_050)).toBeNull();
+  });
+
+  it("paces a large overdue backlog with one strictly future alarm", () => {
+    const backlog = Array.from({ length: 1_000 }, (_, index) => ({
+      key: `job-${1_000 + index}`,
+      version: 1,
+      state: "waiting-capacity",
+      event: {
+        deliveryId: `delivery-${index}`,
+        action: "queued",
+        jobId: 1_000 + index,
+        runId: 51,
+        installationId: 7,
+        repository: { id: 3, fullName: "owner/repository" },
+        headBranch: "main",
+        labels: ["self-hosted", "jit-runner", "jit-run-51"],
+      },
+      createdAt: 800 + index,
+      updatedAt: 900,
+      expiresAt: 2_000,
+      nextAttemptAt: 950,
+    } satisfies JobRecord));
+
+    expect(nextControllerAlarmAt(backlog, 300, 1_000)).toBe(1_030);
   });
 });
 

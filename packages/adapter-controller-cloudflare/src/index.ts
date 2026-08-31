@@ -8,7 +8,7 @@ import type {
   Telemetry,
 } from "../../contracts/src/index";
 import { RetryableError, TerminalError } from "../../contracts/src/index";
-import { Controller, trustWorkflowJobPayload } from "../../core/src/index";
+import { CAPACITY_RETRY_SECONDS, Controller, trustWorkflowJobPayload } from "../../core/src/index";
 import { WebCryptoBootstrapTokenBroker, verifyWebhookSignature } from "../../crypto/src/index";
 import { GithubAppRunnerControl } from "../../adapter-github-app/src/index";
 import { HetznerComputeProvider } from "../../adapter-compute-hetzner/src/index";
@@ -60,7 +60,7 @@ const BOOTSTRAP_AUTHORIZATION = /^Bearer [A-Za-z0-9_-]{43}$/;
 const POOL_CLAIM_PATH = "/v1/pool/claim";
 const POOL_ENROLL_PATH = "/v1/pool/enroll";
 const POOL_RELEASE_PATH = "/v1/pool/release";
-export const controllerVersion = "0.3.1";
+export const controllerVersion = "0.3.2";
 
 interface LeaseRecord {
   holder: string;
@@ -314,14 +314,10 @@ export class ControllerDurableObject {
 
   private async scheduleNextAlarm(): Promise<void> {
     const active = await this.jobs.listActive();
-    const next = active.reduce<number | null>(
-      (earliest, job) => {
-        const due = ["provisioning", "awaiting-bootstrap", "bootstrapping"].includes(job.state)
-          ? Math.min(job.expiresAt, job.updatedAt + this.config.provisioningTimeoutSeconds)
-          : job.expiresAt;
-        return earliest === null || due < earliest ? due : earliest;
-      },
-      null,
+    const next = nextControllerAlarmAt(
+      active,
+      this.config.provisioningTimeoutSeconds,
+      Math.floor(Date.now() / 1000),
     );
     if (next === null) {
       await this.state.storage.deleteAlarm();
@@ -367,7 +363,7 @@ class CloudflareJobStore implements JobStore {
   async listActive(): Promise<JobRecord[]> {
     const records = await this.storage.list<JobRecord>({ prefix: "job:" });
     return [...records.values()].filter((record) =>
-      ["provisioning", "awaiting-bootstrap", "bootstrapping", "running", "cleaning"].includes(record.state),
+      ["provisioning", "waiting-capacity", "waiting-retry", "awaiting-bootstrap", "bootstrapping", "running", "cleaning"].includes(record.state),
     );
   }
 
@@ -379,6 +375,23 @@ class CloudflareJobStore implements JobStore {
     if (keys.length > 0) await this.storage.delete(keys);
     return keys.length;
   }
+}
+
+export function nextControllerAlarmAt(
+  active: readonly JobRecord[],
+  provisioningTimeoutSeconds: number,
+  now: number,
+): number | null {
+  const due = active.reduce<number | null>((earliest, job) => {
+    const due = ["waiting-capacity", "waiting-retry"].includes(job.state)
+      ? Math.min(job.expiresAt, job.nextAttemptAt ?? job.updatedAt + CAPACITY_RETRY_SECONDS)
+      : ["provisioning", "awaiting-bootstrap", "bootstrapping"].includes(job.state)
+        ? Math.min(job.expiresAt, job.updatedAt + provisioningTimeoutSeconds)
+        : job.expiresAt;
+    return earliest === null || due < earliest ? due : earliest;
+  }, null);
+  if (due === null || due > now) return due;
+  return now + CAPACITY_RETRY_SECONDS;
 }
 
 class CloudflareLeaseStore implements LeaseStore {
