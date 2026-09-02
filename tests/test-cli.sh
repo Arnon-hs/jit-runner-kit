@@ -39,6 +39,8 @@ grep -Fxq 'ARG GH_SHA256_X64=3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b680
 grep -Fxq 'ARG GH_SHA256_ARM64=cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86' \
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fxq 'ARG RUSTUP_VERSION=1.28.2' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq 'docker.io file git jq' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq '&& file --version' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fxq 'ARG RUSTUP_SHA256_X64=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c' \
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fxq 'ARG RUSTUP_SHA256_ARM64=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c' \
