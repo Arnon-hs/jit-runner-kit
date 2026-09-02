@@ -19,7 +19,8 @@ RUN test -n "$RUNNER_VERSION" && test -n "$RUNNER_SHA256_X64" && test -n "$RUNNE
     && test -n "$RUSTUP_LICENSE_MIT_SHA256" && test -n "$RUSTUP_LICENSE_APACHE_SHA256" \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
-      build-essential ca-certificates curl docker-compose-v2 docker.io git jq php-cli python3 shellcheck unzip \
+      build-essential ca-certificates curl docker-compose-v2 docker.io file git jq php-cli python3 shellcheck unzip \
+    && file --version \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1001 --shell /bin/bash runner \
     && install -d -o runner -g runner /opt/actions-runner /runner \
