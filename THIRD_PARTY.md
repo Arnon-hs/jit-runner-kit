@@ -6,6 +6,7 @@ The project source is licensed under MIT. It does not vendor the source of the t
 | --- | --- | --- | --- |
 | GitHub Actions runner | Downloaded onto each temporary VM at runtime | [MIT](https://github.com/actions/runner/blob/main/LICENSE) | Archive digest is verified; not committed to this repository. |
 | GitHub CLI | Downloaded into the published pool runner image | [MIT](https://github.com/cli/cli/blob/trunk/LICENSE) | Version and per-architecture archive digests are pinned; the upstream license is retained at `/usr/share/doc/gh/LICENSE` in the image. |
+| rustup | Downloaded into the published pool runner image | [MIT OR Apache-2.0](https://github.com/rust-lang/rustup/tree/1.28.2#license) | Version and per-architecture binary digests are pinned; both upstream license texts are retained under `/usr/share/doc/rustup` in the image. Toolchains remain workflow-selected and are not baked into the base image. |
 | Hetzner Cloud provider | Downloaded by OpenTofu or Terraform | [MPL-2.0](https://github.com/hetznercloud/terraform-provider-hcloud/blob/main/LICENSE) | Provider binary is not vendored. The lock file records checksums. |
 | OpenTofu setup action | Installs the default IaC CLI in Actions mode | [MPL-2.0](https://github.com/opentofu/setup-opentofu/blob/main/LICENSE) | Referenced workflow dependency, not redistributed here. |
 | HashiCorp setup action | Optional Terraform installation path | [MPL-2.0](https://github.com/hashicorp/setup-terraform/blob/main/LICENSE) | Referenced only when `iac-engine: terraform` is selected. |

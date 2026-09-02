@@ -38,6 +38,15 @@ grep -Fxq 'ARG GH_SHA256_X64=3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b680
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fxq 'ARG GH_SHA256_ARM64=cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86' \
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG RUSTUP_VERSION=1.28.2' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG RUSTUP_SHA256_X64=20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG RUSTUP_SHA256_ARM64=e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG RUSTUP_LICENSE_MIT_SHA256=c9a75f18b9ab2927829a208fc6aa2cf4e63b8420887ba29cdb265d6619ae82d5' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fxq 'ARG RUSTUP_LICENSE_APACHE_SHA256=8173d5c29b4f956d532781d2b86e4e30f83e6b7878dce18c919451d6ba707c90' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 EXPECTED_GH_ARCHIVE="gh_\${GH_VERSION}_linux_\${gh_arch}.tar.gz"
 EXPECTED_GH_CHECKSUM="echo \"\${gh_sha}  /tmp/gh.tar.gz\" | sha256sum --check --strict"
 EXPECTED_GH_BINARY="--strip-components=2 \"gh_\${GH_VERSION}_linux_\${gh_arch}/bin/gh\""
@@ -53,6 +62,28 @@ grep -Fq -- "$EXPECTED_GH_LICENSE" \
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fq 'chmod 0444 /usr/share/doc/gh/LICENSE' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fq '&& gh --version' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+EXPECTED_RUSTUP_URL="https://static.rust-lang.org/rustup/archive/\${RUSTUP_VERSION}/\${rustup_arch}-unknown-linux-gnu/rustup-init"
+EXPECTED_RUSTUP_CHECKSUM="echo \"\${rustup_sha}  /tmp/rustup-init\" | sha256sum --check --strict"
+EXPECTED_RUSTUP_PATH="PATH=/home/runner/.cargo/bin:\${PATH}"
+grep -Fq "$EXPECTED_RUSTUP_URL" \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq "$EXPECTED_RUSTUP_CHECKSUM" \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq 'ENV CARGO_HOME=/home/runner/.cargo' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq "$EXPECTED_RUSTUP_PATH" "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq '/home/runner/rustup-init --yes --profile minimal --default-toolchain none --no-modify-path' \
+  "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq '&& rustup --version' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq '/usr/share/doc/rustup/LICENSE-MIT' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq '/usr/share/doc/rustup/LICENSE-APACHE' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
+grep -Fq '| rustup |' "${ROOT_DIR}/THIRD_PARTY.md"
+RUNNER_IMAGE_WORKFLOW="${ROOT_DIR}/.github/workflows/runner-image.yml"
+grep -Fq "if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')" \
+  "$RUNNER_IMAGE_WORKFLOW"
+EXPECTED_RUNNER_IMAGE_LABELS="runs-on: [self-hosted, linux, x64, jit-runner, \"jit-run-\${{ github.run_id }}\"]"
+grep -Fq "$EXPECTED_RUNNER_IMAGE_LABELS" \
+  "$RUNNER_IMAGE_WORKFLOW"
+test "$(awk '/^jobs:$/ { in_jobs=1; next } in_jobs && /^[^ ]/ { in_jobs=0 } in_jobs && /^  [a-zA-Z0-9_-]+:$/ { count++ } END { print count+0 }' "$RUNNER_IMAGE_WORKFLOW")" -eq 1
 EXPECTED_JIT_CONFIG_PATH="\${job_dir}/jit-config"
 grep -Fq "chmod 600 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"
 grep -Fq "chown 1001:1001 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"
