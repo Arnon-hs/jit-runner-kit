@@ -71,7 +71,7 @@ grep -Fq "$EXPECTED_RUSTUP_CHECKSUM" \
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fq 'ENV CARGO_HOME=/home/runner/.cargo' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fq "$EXPECTED_RUSTUP_PATH" "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
-grep -Fq '/home/runner/rustup-init --yes --profile minimal --default-toolchain none --no-modify-path' \
+grep -Fq '/home/runner/rustup-init -y --profile minimal --default-toolchain none --no-modify-path' \
   "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fq '&& rustup --version' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"
 grep -Fq '/usr/share/doc/rustup/LICENSE-MIT' "${ROOT_DIR}/providers/shared-host/Dockerfile.runner"

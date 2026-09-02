@@ -73,7 +73,7 @@ USER runner
 ENV CARGO_HOME=/home/runner/.cargo \
     RUSTUP_HOME=/home/runner/.rustup \
     PATH=/home/runner/.cargo/bin:${PATH}
-RUN /home/runner/rustup-init --yes --profile minimal --default-toolchain none --no-modify-path \
+RUN /home/runner/rustup-init -y --profile minimal --default-toolchain none --no-modify-path \
     && rm /home/runner/rustup-init \
     && rustup --version
 WORKDIR /runner
