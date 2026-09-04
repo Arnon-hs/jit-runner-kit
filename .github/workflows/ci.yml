@@ -108,7 +108,7 @@ jobs:
         with:
           name: runner-state-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/jit-runner-state
-      - uses: Arnon-hs/jit-runner-kit/actions/destroy@96807f37c85f7f6f6b5743e305e6385157fafd4d
+      - uses: Arnon-hs/jit-runner-kit/actions/destroy@e39970fa86706b84a95de670aa8b3038a2bde257
         with:
           hcloud-token: ${{ secrets.HCLOUD_TOKEN }}
           github-token: ${{ secrets.JIT_RUNNER_GITHUB_TOKEN }}
