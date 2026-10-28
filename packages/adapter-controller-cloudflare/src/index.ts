@@ -319,11 +319,24 @@ export class ControllerDurableObject {
       this.config.provisioningTimeoutSeconds,
       Math.floor(Date.now() / 1000),
     );
-    if (next === null) {
-      await this.state.storage.deleteAlarm();
-      return;
-    }
-    await this.state.storage.setAlarm(next * 1000);
+    await scheduleControllerAlarm(this.state.storage, next);
+  }
+}
+
+export async function scheduleControllerAlarm(
+  storage: Pick<DurableObjectStorage, "getAlarm" | "setAlarm" | "deleteAlarm">,
+  next: number | null,
+): Promise<void> {
+  if (next === null) {
+    await storage.deleteAlarm();
+    return;
+  }
+  const scheduled = await storage.getAlarm();
+  const nextMillis = next * 1000;
+  // Pool claims poll more often than the retry delay. Preserve the earliest
+  // alarm so polling cannot indefinitely postpone an overdue queue's retry.
+  if (scheduled === null || nextMillis < scheduled) {
+    await storage.setAlarm(nextMillis);
   }
 }
 
