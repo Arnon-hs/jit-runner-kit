@@ -3,6 +3,7 @@ import packageMetadata from "../package.json";
 import worker, {
   controllerVersion,
   nextControllerAlarmAt,
+  scheduleControllerAlarm,
   SerialOperationGate,
   type Env,
 } from "../packages/adapter-controller-cloudflare/src/index";
@@ -299,6 +300,47 @@ describe("Cloudflare controller alarm scheduling", () => {
     } satisfies JobRecord));
 
     expect(nextControllerAlarmAt(backlog, 300, 1_000)).toBe(1_030);
+  });
+});
+
+describe("Cloudflare controller alarm persistence", () => {
+  function storageFixture(initial: number | null = null) {
+    let alarm = initial;
+    return {
+      getAlarm: vi.fn(async () => alarm),
+      setAlarm: vi.fn(async (when: number | Date) => { alarm = Number(when); }),
+      deleteAlarm: vi.fn(async () => { alarm = null; }),
+    };
+  }
+
+  it("does not postpone an overdue queue's retry on frequent idle pool polls", async () => {
+    const storage = storageFixture();
+    // Every poll recomputes now + 30 seconds for an overdue backlog.
+    for (let now = 1_000; now < 1_030; now += 5) {
+      await scheduleControllerAlarm(storage, now + 30);
+    }
+    expect(await storage.getAlarm()).toBe(1_030_000);
+    expect(storage.setAlarm).toHaveBeenCalledTimes(1);
+  });
+
+  it("advances an alarm for newly earlier work or a TTL deadline", async () => {
+    const storage = storageFixture(1_100_000);
+    await scheduleControllerAlarm(storage, 1_020);
+    expect(await storage.getAlarm()).toBe(1_020_000);
+  });
+
+  it("removes the alarm when no active jobs remain", async () => {
+    const storage = storageFixture(1_100_000);
+    await scheduleControllerAlarm(storage, null);
+    expect(await storage.getAlarm()).toBeNull();
+    expect(storage.deleteAlarm).toHaveBeenCalledOnce();
+  });
+
+  it("sets the next bounded retry after an alarm has fired", async () => {
+    // Durable Object getAlarm returns null in the handler until it sets a new one.
+    const storage = storageFixture();
+    await scheduleControllerAlarm(storage, 1_060);
+    expect(await storage.getAlarm()).toBe(1_060_000);
   });
 });
 
