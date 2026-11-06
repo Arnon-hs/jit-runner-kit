@@ -7,9 +7,35 @@ import worker, {
   SerialOperationGate,
   type Env,
 } from "../packages/adapter-controller-cloudflare/src/index";
-import type { JobRecord } from "../packages/contracts/src/index";
+import type { ControllerTask, JobRecord } from "../packages/contracts/src/index";
 
 const secret = "test-webhook-secret";
+
+describe("Cloudflare queue diagnostics", () => {
+  it.each([
+    { status: 400, code: "github_api_403", expected: "github_api_403" },
+    { status: 503, code: "github_api_403", expected: "github_api_403" },
+    { status: 400, code: "private-response", expected: "unclassified" },
+  ])("reports safe failure codes and preserves delivery policy: $status / $expected", async ({ status, code, expected }) => {
+    const log = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const env = fixtureEnv();
+    env.CONTROLLER = { idFromName: vi.fn(), get: vi.fn(() => ({
+      fetch: vi.fn(async () => Response.json({ errorCode: code, message: "private-response" }, { status })),
+    })) } as unknown as DurableObjectNamespace;
+    const ack = vi.fn(), retry = vi.fn();
+    const batch: MessageBatch<ControllerTask> = {
+      queue: "tasks", metadata: { metrics: { backlogCount: 1, backlogBytes: 20 } }, ackAll: vi.fn(), retryAll: vi.fn(),
+      messages: [{ id: "delivery-1", timestamp: new Date(0), body: { kind: "reconcile", requestedAt: 0 }, attempts: 1, ack, retry }],
+    };
+    try {
+      await worker.queue(batch, env);
+      expect(log).toHaveBeenCalledWith(JSON.stringify({ event: "controller.task_failed", status, errorCode: expected }));
+      expect(log.mock.calls.flat().join(" ")).not.toContain("private-response");
+      expect(ack).toHaveBeenCalledTimes(status < 500 ? 1 : 0);
+      expect(retry).toHaveBeenCalledTimes(status >= 500 ? 1 : 0);
+    } finally { log.mockRestore(); }
+  });
+});
 
 describe("Cloudflare public webhook boundary", () => {
   it("reports the package release version from the health endpoint", async () => {

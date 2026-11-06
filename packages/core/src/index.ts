@@ -664,7 +664,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function safeProviderErrorCode(error: unknown): string {
+export function safeProviderErrorCode(error: unknown): string {
   if (!(error instanceof Error)) return "unknown";
   const match = error.message.match(/^(Hetzner|GitHub) API (\d{3}):/);
   return match ? `${match[1]!.toLowerCase()}_api_${match[2]}` : "unclassified";
