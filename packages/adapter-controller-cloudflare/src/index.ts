@@ -8,7 +8,7 @@ import type {
   Telemetry,
 } from "../../contracts/src/index";
 import { RetryableError, TerminalError } from "../../contracts/src/index";
-import { CAPACITY_RETRY_SECONDS, Controller, safeProviderErrorCode, trustWorkflowJobPayload } from "../../core/src/index";
+import { CAPACITY_RETRY_SECONDS, Controller, jobKey, safeProviderErrorCode, trustWorkflowJobPayload } from "../../core/src/index";
 import { WebCryptoBootstrapTokenBroker, verifyWebhookSignature } from "../../crypto/src/index";
 import { GithubAppRunnerControl } from "../../adapter-github-app/src/index";
 import { HetznerComputeProvider } from "../../adapter-compute-hetzner/src/index";
@@ -171,15 +171,17 @@ export default {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(message.body),
         });
-        if (!response.ok) {
+        if (!response.ok || message.body.kind === "workflow-job") {
           let errorCode = "unclassified";
+          let jobState: string | undefined;
           try {
-            const detail = await response.json() as { errorCode?: unknown };
+            const detail = await response.json() as { errorCode?: unknown; jobState?: unknown };
             if (typeof detail.errorCode === "string" && /^(?:(?:github|hetzner)_api_\d{3}|unclassified|unknown)$/.test(detail.errorCode)) {
               errorCode = detail.errorCode;
             }
+            if (typeof detail.jobState === "string" && /^(?:provisioning|waiting-capacity|waiting-retry|awaiting-bootstrap|bootstrapping|running|cleaning|completed|failed)$/.test(detail.jobState)) jobState = detail.jobState;
           } catch { /* A malformed response must not change delivery policy. */ }
-          console.warn(JSON.stringify({ event: "controller.task_failed", status: response.status, errorCode }));
+          console.warn(JSON.stringify({ event: response.ok ? "controller.task_processed" : "controller.task_failed", status: response.status, errorCode, ...(jobState ? { jobState } : {}) }));
         }
         if (response.ok || response.status < 500) {
           message.ack();
@@ -255,7 +257,8 @@ export class ControllerDurableObject {
         else if (task.kind === "reconcile") await this.controller.reconcile();
         else throw new TerminalError("unknown controller task");
         await this.scheduleNextAlarm();
-        return json({ accepted: true });
+        const record = task.kind === "workflow-job" ? await this.jobs.get(jobKey(task.event)) : null;
+        return json({ accepted: true, ...(record ? { jobState: record.state, ...(record.failure ? { errorCode: safeProviderErrorCode(new Error(record.failure)) } : {}) } : {}) });
       }
       if (request.method === "POST" && url.pathname === "/reconcile") {
         await this.controller.reconcile();
