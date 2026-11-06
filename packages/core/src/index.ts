@@ -467,6 +467,12 @@ export class Controller {
         updatedAt: this.ports.clock.now(),
       });
     if (!deferred) return false;
+    this.ports.telemetry.emit("provision.failed", {
+      jobKey: record.key,
+      retryable,
+      errorType: error instanceof Error ? error.name : "unknown",
+      errorCode: safeProviderErrorCode(error),
+    });
     if (retryable) {
       this.ports.telemetry.emit("provision.retry_scheduled", {
         jobKey: record.key,
