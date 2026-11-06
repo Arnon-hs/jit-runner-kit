@@ -8,7 +8,7 @@ import type {
   Telemetry,
 } from "../../contracts/src/index";
 import { RetryableError, TerminalError } from "../../contracts/src/index";
-import { CAPACITY_RETRY_SECONDS, Controller, trustWorkflowJobPayload } from "../../core/src/index";
+import { CAPACITY_RETRY_SECONDS, Controller, safeProviderErrorCode, trustWorkflowJobPayload } from "../../core/src/index";
 import { WebCryptoBootstrapTokenBroker, verifyWebhookSignature } from "../../crypto/src/index";
 import { GithubAppRunnerControl } from "../../adapter-github-app/src/index";
 import { HetznerComputeProvider } from "../../adapter-compute-hetzner/src/index";
@@ -171,6 +171,16 @@ export default {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(message.body),
         });
+        if (!response.ok) {
+          let errorCode = "unclassified";
+          try {
+            const detail = await response.json() as { errorCode?: unknown };
+            if (typeof detail.errorCode === "string" && /^(?:(?:github|hetzner)_api_\d{3}|unclassified|unknown)$/.test(detail.errorCode)) {
+              errorCode = detail.errorCode;
+            }
+          } catch { /* A malformed response must not change delivery policy. */ }
+          console.warn(JSON.stringify({ event: "controller.task_failed", status: response.status, errorCode }));
+        }
         if (response.ok || response.status < 500) {
           message.ack();
           continue;
@@ -635,9 +645,9 @@ function json(body: unknown, status = 200, headers: HeadersInit = {}): Response 
 function errorResponse(error: unknown): Response {
   if (error instanceof PayloadTooLargeError) return json({ error: "payload_too_large" }, 413);
   if (error instanceof RetryableError) {
-    return json({ error: "retryable_failure" }, 503, { "Retry-After": String(error.delaySeconds) });
+    return json({ error: "retryable_failure", errorCode: safeProviderErrorCode(error) }, 503, { "Retry-After": String(error.delaySeconds) });
   }
-  if (error instanceof TerminalError) return json({ error: "request_rejected" }, 400);
+  if (error instanceof TerminalError) return json({ error: "request_rejected", errorCode: safeProviderErrorCode(error) }, 400);
   console.error(JSON.stringify({
     level: "error",
     event: "controller.unexpected_failure",
