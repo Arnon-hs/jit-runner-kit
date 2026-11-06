@@ -111,6 +111,10 @@ Do not place GitHub tokens, cloud credentials, JIT configuration, or application
 
 The repository's `Runner image` workflow builds `providers/shared-host/Dockerfile.runner` after a relevant merge to `main` and pushes a commit-tagged image to GHCR. Record the workflow's `image@sha256:...` identity and put that exact digest in `POOL_RUNNER_IMAGE`; never configure a mutable tag in the Worker.
 
+The image publisher uses a standard GitHub-hosted Ubuntu runner only in this public repository, after successful `Public quality gates` for the exact source commit. This removes the bootstrap dependency on the runner image it is rebuilding. It refuses private repositories; the private application release contract remains in [Release control contract](release-control-contract.md). Standard hosted compute in public repositories is [free](https://docs.github.com/en/billing/concepts/product-billing/github-actions); this workflow does not change spending limits.
+
+The runner entrypoint disables automatic updates. Keep the runner version and both official archive checksums current in the image workflow and the shared-host cloud-init template. GitHub can stop assigning jobs to an outdated runner, so an offline registration is not execution proof. Verify a real queued job after updating the immutable image pin.
+
 Forks can keep the workflow and change only its lowercase `IMAGE` value. Add shells, PHP extensions, Node/Python/Ruby runtimes, databases clients, or OS libraries to the Dockerfile, then run a ready PR through the normal quality and security review. After merge, use the new digest in a Worker revision and repeat success/failure cleanup canaries before production use.
 
 ## Use a prebuilt VM image

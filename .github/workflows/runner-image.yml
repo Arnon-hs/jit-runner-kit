@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  checks: read
   packages: write
 
 concurrency:
@@ -19,16 +20,36 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/arnon-hs/jit-runner-kit-runner
-  RUNNER_VERSION: 2.336.0
-  RUNNER_SHA256_X64: 04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d
-  RUNNER_SHA256_ARM64: 58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1
+  RUNNER_VERSION: 2.338.2
+  RUNNER_SHA256_X64: baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
+  RUNNER_SHA256_ARM64: 670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945
 
 jobs:
   publish:
     name: Build immutable runner image
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: [self-hosted, linux, x64, jit-runner, "jit-run-${{ github.run_id }}"]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.event.repository.private == false && github.repository == 'Arnon-hs/jit-runner-kit'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
+      - name: Require successful quality checks for this exact source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            checks="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100")"
+            if jq -e '.check_runs | any(.app.slug == "github-actions" and .name == "Public quality gates" and .conclusion == "success")' <<<"$checks" >/dev/null; then
+              exit 0
+            fi
+            if jq -e '.check_runs | any(.app.slug == "github-actions" and .name == "Public quality gates" and .status == "completed" and .conclusion != "success")' <<<"$checks" >/dev/null; then
+              echo 'Exact-source quality checks did not pass' >&2
+              exit 1
+            fi
+            sleep 10
+          done
+          echo 'Exact-source quality checks are missing' >&2
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -62,4 +83,6 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           test "$DIGEST" != ""
+          actual="$(docker run --rm --entrypoint /opt/actions-runner/bin/Runner.Listener "$IMAGE@$DIGEST" --version)"
+          test "$actual" = "$RUNNER_VERSION"
           printf '### Immutable runner image\n\n%s@%s\n' "$IMAGE" "$DIGEST" >>"$GITHUB_STEP_SUMMARY"
