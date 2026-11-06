@@ -33,6 +33,22 @@ describe("provider-agnostic controller", () => {
     expect(() => createFixture(3)).toThrow("maxRunners must be between 1 and 2");
   });
 
+  it("reports a terminal provisioning failure without exposing the provider response", async () => {
+    const fixture = createFixture();
+    fixture.runners.failNextAccess = new TerminalError("GitHub API 403: private-provider-response");
+
+    await expect(fixture.controller.handleWorkflowJob(event)).rejects.toBeInstanceOf(TerminalError);
+
+    expect((await fixture.jobs.get("job-101"))?.state).toBe("failed");
+    expect(fixture.compute.created).toHaveLength(0);
+    expect(fixture.leases.active.size).toBe(0);
+    expect(fixture.telemetryEvents).toContainEqual({
+      name: "provision.failed",
+      attributes: { jobKey: "job-101", retryable: false, errorType: "TerminalError", errorCode: "github_api_403" },
+    });
+    expect(JSON.stringify(fixture.telemetryEvents)).not.toContain("private-provider-response");
+  });
+
   it("runs queued -> bootstrap -> completed and cleans every external record", async () => {
     const fixture = createFixture();
     await fixture.controller.handleWorkflowJob(event);
