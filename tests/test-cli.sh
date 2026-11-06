@@ -82,9 +82,11 @@ grep -Fq '| rustup |' "${ROOT_DIR}/THIRD_PARTY.md"
 RUNNER_IMAGE_WORKFLOW="${ROOT_DIR}/.github/workflows/runner-image.yml"
 grep -Fq "if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')" \
   "$RUNNER_IMAGE_WORKFLOW"
-EXPECTED_RUNNER_IMAGE_LABELS="runs-on: [self-hosted, linux, x64, jit-runner, \"jit-run-\${{ github.run_id }}\"]"
-grep -Fq "$EXPECTED_RUNNER_IMAGE_LABELS" \
-  "$RUNNER_IMAGE_WORKFLOW"
+grep -Fq 'runs-on: ubuntu-24.04' "$RUNNER_IMAGE_WORKFLOW"
+grep -Fq 'github.event.repository.private == false' "$RUNNER_IMAGE_WORKFLOW"
+grep -Fq 'Require successful quality checks for this exact source' "$RUNNER_IMAGE_WORKFLOW"
+grep -Fq "commits/\${GITHUB_SHA}/check-runs" "$RUNNER_IMAGE_WORKFLOW"
+grep -Fq '.name == "Public quality gates" and .conclusion == "success"' "$RUNNER_IMAGE_WORKFLOW"
 test "$(awk '/^jobs:$/ { in_jobs=1; next } in_jobs && /^[^ ]/ { in_jobs=0 } in_jobs && /^  [a-zA-Z0-9_-]+:$/ { count++ } END { print count+0 }' "$RUNNER_IMAGE_WORKFLOW")" -eq 1
 EXPECTED_JIT_CONFIG_PATH="\${job_dir}/jit-config"
 grep -Fq "chmod 600 \"${EXPECTED_JIT_CONFIG_PATH}\"" "$POOL_AGENT"
